@@ -59,9 +59,16 @@ class Smash64World(World):
     settings: ClassVar[Smash64Settings]
 
     def generate_early(self):
-        # Only the opponent fights backed by the tracker RAM addresses are created.
-        # Bonus stages and stage-only pseudo locations are intentionally absent.
-        self.active_locations = dict(location_table)
+        # Opponent fights are always created. Bonus stages (Break the Targets,
+        # Board the Platforms) are created only when include_bonus_stages is on;
+        # their detection reuses the same (character, stage) snapshot path as the
+        # fights, so the only thing the option controls is whether they exist.
+        include_bonus = bool(self.options.include_bonus_stages.value)
+        self.active_locations = {
+            name: data
+            for name, data in location_table.items()
+            if include_bonus or data["type"] != "bonus_stage"
+        }
 
     def create_regions(self):
         menu = Region("Menu", self.player, self.multiworld)

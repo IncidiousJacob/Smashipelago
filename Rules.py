@@ -1,12 +1,15 @@
 from worlds.generic.Rules import set_rule
-from .Locations import location_table
 
 
 def set_rules(world):
     player = world.player
     multiworld = world.multiworld
 
-    for location_name, data in location_table.items():
+    # Iterate only the locations this slot actually created (active_locations),
+    # not the full location_table. The full table includes bonus-stage locations
+    # that are absent when include_bonus_stages is off; calling get_location on a
+    # location that was never created raises KeyError.
+    for location_name, data in world.active_locations.items():
         character = data["character"]
         set_rule(
             multiworld.get_location(location_name, player),

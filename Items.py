@@ -14,6 +14,7 @@ from .Names import (
     CHARACTER_NAME_BY_INTERNAL_ID,
     CLASSIC_FIGHT_NAME_BY_STAGE_ID,
     CLASSIC_STAGE_NAME_BY_INTERNAL_ID,
+    BONUS_STAGE_NAME_BY_STAGE_ID,
 )
 from .rom import SMASH64_AP_MARKER, SMASH64_AP_MARKER_OFFSET, SMASH64_PLAYER_NAME_OFFSET, SMASH64_PLAYER_NAME_LENGTH
 
@@ -36,6 +37,24 @@ CLASSIC_CHAR_ADDR = 0x000A4B3B
 
 STATE_IN_BATTLE = 0x01
 STATE_RESULTS = 0x33
+
+# Bonus games (Break the Targets / Board the Platforms) do NOT update the normal
+# stage byte (CLASSIC_STAGE_ADDR reads 0x00 during a bonus game) and do not pass
+# through STATE_IN_BATTLE. Instead GAME_STATE_ADDR reads 0x35 while in a bonus
+# game (RA: "in BTB or BTF bonus game"). Confirmed from live RAM dumps.
+STATE_IN_BONUS = 0x35
+
+# There is no reliable RAM byte that distinguishes Break the Targets from Board
+# the Platforms at read time (every candidate byte read identically or tracked
+# unrelated ladder progress). Instead we use the FIXED 1P Classic ladder order,
+# which is identical for every character:
+#   ... -> Fox fight -> [Break the Targets] -> ... -> Giant DK fight -> [Board the Platforms] -> ...
+# So the bonus game's identity is determined by which fight was cleared most
+# recently before entering the bonus state. We anchor on the fight STAGE id.
+BONUS_AFTER_FIGHT_STAGE = {
+    0x01: 0x09,  # after Fox (Sector Z)      -> Break the Targets
+    0x02: 0x0A,  # after Giant DK (Congo)    -> Board the Platforms
+}
 
 CHARACTER_SELECT_VALUE_BY_NAME = {
     name: CHARACTER_INTERNAL_IDS[name]
@@ -63,6 +82,8 @@ class Smash64Client(BizHawkClient):
     prev_game_state: int | None
     snapshot_stage: int | None
     snapshot_char: int | None
+    last_fight_stage: int | None
+    last_fight_char: int | None
     goal_sent: bool
 
     def __init__(self) -> None:
@@ -76,6 +97,8 @@ class Smash64Client(BizHawkClient):
         self.prev_game_state = None
         self.snapshot_stage = None
         self.snapshot_char = None
+        self.last_fight_stage = None
+        self.last_fight_char = None
         self.goal_sent = False
 
     async def validate_rom(self, ctx: "BizHawkClientContext") -> bool:
@@ -110,7 +133,11 @@ class Smash64Client(BizHawkClient):
             self.player_name = None
 
         ctx.game = self.game
-        ctx.items_handling = 0b001
+        # 0b111 = full item handling: remote items + the player's own local item
+        # finds + starting inventory. Fighter Passes are usually found in the
+        # player's own world, so 0b001 (remote only) meant a found pass never
+        # arrived in items_received and the character stayed locked.
+        ctx.items_handling = 0b111
         ctx.want_slot_data = True
         ctx.watcher_timeout = 0.016
 
@@ -121,6 +148,8 @@ class Smash64Client(BizHawkClient):
         self.prev_game_state = None
         self.snapshot_stage = None
         self.snapshot_char = None
+        self.last_fight_stage = None
+        self.last_fight_char = None
         self.goal_sent = False
         return True
 
@@ -213,16 +242,66 @@ class Smash64Client(BizHawkClient):
 
         self.last_seen_game_state = game_state
 
+        # Snapshot the stage/character on the rising edge into a battle. This is
+        # the logic that reliably detects fight clears; do not re-latch on other
+        # frames, or a stale stage byte from a previous fight can pollute the
+        # snapshot and cause the wrong (or a repeated) location to be sent.
         if game_state == STATE_IN_BATTLE and self.prev_game_state != STATE_IN_BATTLE:
             self.snapshot_stage = stage_id
             self.snapshot_char = char_id
 
+        # Bonus games never set STATE_IN_BATTLE and never update the normal stage
+        # byte. On the rising edge into the bonus state (0x35), resolve which bonus
+        # game this is from the LAST FIGHT cleared, using the fixed ladder order:
+        # Break the Targets always follows the Fox fight; Board the Platforms always
+        # follows the Giant DK fight. There is no reliable in-RAM byte that names the
+        # bonus game, so this ladder-position approach is what we anchor on.
+        if game_state == STATE_IN_BONUS and self.prev_game_state != STATE_IN_BONUS:
+            from CommonClient import logger
+
+            mapped_stage = None
+            if self.last_fight_stage is not None:
+                mapped_stage = BONUS_AFTER_FIGHT_STAGE.get(self.last_fight_stage)
+
+            bonus_label = BONUS_STAGE_NAME_BY_STAGE_ID.get(mapped_stage) if mapped_stage is not None else None
+            logger.info(
+                f"[smash64] entered bonus game: char=0x{char_id:02X} "
+                f"last_fight_stage="
+                f"{'0x%02X' % self.last_fight_stage if self.last_fight_stage is not None else None} "
+                f"-> {bonus_label or 'unresolved'}"
+            )
+
+            if mapped_stage is not None:
+                # Use the character from the last fight (char byte may read 0x00 or
+                # a sentinel during the bonus game itself).
+                self.snapshot_stage = mapped_stage
+                self.snapshot_char = (
+                    self.last_fight_char
+                    if self.last_fight_char is not None
+                    else char_id
+                )
+                # Consume the anchor so the same fight can't resolve two bonuses.
+                self.last_fight_stage = None
+
         if game_state == STATE_RESULTS and self.prev_game_state != STATE_RESULTS:
             if self.snapshot_stage is not None and self.snapshot_char is not None:
+                from CommonClient import logger
+
                 location_id = location_id_by_character_and_stage_id.get((self.snapshot_char, self.snapshot_stage))
                 stage_name = CLASSIC_STAGE_NAME_BY_INTERNAL_ID.get(self.snapshot_stage, f"Unknown Stage 0x{self.snapshot_stage:02X}")
-                fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(self.snapshot_stage, f"Unsupported Stage 0x{self.snapshot_stage:02X}")
+                fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(self.snapshot_stage)
+                bonus_name = BONUS_STAGE_NAME_BY_STAGE_ID.get(self.snapshot_stage)
                 char_name = CHARACTER_NAME_BY_SELECT_VALUE.get(self.snapshot_char, f"Unknown 0x{self.snapshot_char:02X}")
+                kind = "bonus" if bonus_name is not None else ("fight" if fight_name is not None else "unmapped")
+
+                # Surfaces what RAM reported on stage clear (char, stage byte,
+                # resolved kind/location) so detection can be traced without a
+                # hex editor.
+                logger.debug(
+                    f"[smash64] cleared: char={char_name}(0x{self.snapshot_char:02X}) "
+                    f"stage=0x{self.snapshot_stage:02X}({stage_name}) kind={kind} "
+                    f"loc_id={location_id}"
+                )
 
                 if location_id is not None:
                     already_checked = set(getattr(ctx, "checked_locations", set()))
@@ -230,10 +309,18 @@ class Smash64Client(BizHawkClient):
                     if location_id not in self.local_checked_locations and location_id not in already_checked:
                         self.local_checked_locations.add(location_id)
                         await ctx.send_msgs([{"cmd": "LocationChecks", "locations": [location_id]}])
-                    else:
-                        pass
                 else:
-                    pass
+                    logger.debug(
+                        f"[smash64] no AP location for (char 0x{self.snapshot_char:02X}, "
+                        f"stage 0x{self.snapshot_stage:02X}) - either not a check or bonus stages disabled"
+                    )
+
+                # Remember the last FIGHT cleared so the next bonus game can be
+                # identified by ladder position. Only fights update this; bonus
+                # clears must not, or two bonuses in a row would mis-resolve.
+                if kind == "fight":
+                    self.last_fight_stage = self.snapshot_stage
+                    self.last_fight_char = self.snapshot_char
             else:
                 pass
 
