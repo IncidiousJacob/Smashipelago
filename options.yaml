@@ -1,0 +1,7 @@
+name: Player1
+Super Smash Bros. 64:
+  progression_balancing: 50
+  accessibility: items
+  starting_character: Mario
+  required_classic_completions: 8
+  include_bonus_stages: true

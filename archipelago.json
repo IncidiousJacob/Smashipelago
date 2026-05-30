@@ -1,0 +1,132 @@
+import os
+from BaseClasses import Region, Tutorial
+import settings
+from typing import ClassVar
+from worlds.AutoWorld import World, WebWorld
+
+from .Items import Smash64Item, item_table, item_name_to_id
+from .Names import CHARACTERS
+from .Locations import Smash64Location, location_table, location_name_to_id
+from .Options import Smash64Options
+from .Rules import set_rules
+from .client import Smash64Client
+from .rom import Smash64Patch
+
+
+class Smash64Settings(settings.Group):
+    class RomFile(settings.UserFilePath):
+        description = "Super Smash Bros. 64 USA ROM File (.z64, .n64, or .v64)"
+        copy_to = "smash64.z64"
+        md5s = Smash64Patch.hashes
+
+    rom_file: RomFile = RomFile(RomFile.copy_to)
+
+
+class Smash64WebWorld(WebWorld):
+    theme = "partyTime"
+    tutorials = [Tutorial(
+        "Multiworld Setup Guide",
+        "A guide to setting up Super Smash Bros. 64 for Archipelago.",
+        "English",
+        "setup_en.md",
+        "setup/en",
+        ["IncidiousJacob", "ChatGPT"],
+    )]
+
+
+class Smash64World(World):
+    """Super Smash Bros. 64 APWorld prototype.
+
+    Checks:
+    - Every supported 1P Game / Classic opponent fight as each character.
+
+    Items:
+    - Unlock one playable character.
+    """
+
+    game = "Super Smash Bros. 64"
+    author: str = "IncidiousJacob"
+    web = Smash64WebWorld()
+    options_dataclass = Smash64Options
+    options: Smash64Options
+
+    item_name_to_id = item_name_to_id
+    location_name_to_id = location_name_to_id
+
+    topology_present = False
+
+    settings_key = "smash64_settings"
+    settings: ClassVar[Smash64Settings]
+
+    def generate_early(self):
+        # Only the opponent fights backed by the tracker RAM addresses are created.
+        # Bonus stages and stage-only pseudo locations are intentionally absent.
+        self.active_locations = dict(location_table)
+
+    def create_regions(self):
+        menu = Region("Menu", self.player, self.multiworld)
+        classic = Region("Classic Mode", self.player, self.multiworld)
+        menu.connect(classic, "Start Classic Mode")
+
+        for location_name, data in self.active_locations.items():
+            loc = Smash64Location(self.player, location_name, data["code"], classic)
+            classic.locations.append(loc)
+
+        self.multiworld.regions += [menu, classic]
+
+    def create_item(self, name: str):
+        data = item_table[name]
+        return Smash64Item(name, data["classification"], data["code"], self.player)
+
+    def create_items(self):
+        starting_character = self.options.starting_character.character_name
+        starting_item_name = f"{starting_character} Fighter Pass"
+
+        self.multiworld.push_precollected(self.create_item(starting_item_name))
+
+        # Each Master Hand clear is a locked local progression item.
+        # The YAML option required_classic_completions controls how many of
+        # these Classic Mode Clear items are needed for goal completion.
+        locked_goal_location_count = 0
+        for location_name, data in self.active_locations.items():
+            if data["fight"] != "Master Hand":
+                continue
+            self.multiworld.get_location(location_name, self.player).place_locked_item(
+                self.create_item("Classic Mode Clear")
+            )
+            locked_goal_location_count += 1
+
+        character_item_count = 0
+        for item_name in item_table:
+            if not item_name.endswith(" Fighter Pass"):
+                continue
+            if item_name == starting_item_name:
+                continue
+            self.multiworld.itempool.append(self.create_item(item_name))
+            character_item_count += 1
+
+        # Every item placed at a location must have an integer code for the hosted server.
+        # Do not create filler with code=None, or uploaded .archipelago files can crash
+        # WebHostLib's LocationStore with: TypeError: an integer is required.
+        filler_count = len(self.active_locations) - locked_goal_location_count - character_item_count
+        for _ in range(max(0, filler_count)):
+            self.multiworld.itempool.append(self.create_item("Fans Cheers"))
+
+    def get_filler_item_name(self) -> str:
+        return "Fans Cheers"
+
+    def generate_output(self, output_directory: str):
+        patch = Smash64Patch(player=self.player, player_name=self.player_name)
+        out_file_name = self.multiworld.get_out_file_name_base(self.player)
+        patch.write(os.path.join(output_directory, f"{out_file_name}{patch.patch_file_ending}"))
+
+    def set_rules(self):
+        set_rules(self)
+
+    def fill_slot_data(self):
+        return {
+            "starting_character": self.options.starting_character.character_name,
+            "required_classic_completions": int(self.options.required_classic_completions.value),
+            "include_bonus_stages": bool(self.options.include_bonus_stages.value),
+            "characters": list(CHARACTERS),
+        }
