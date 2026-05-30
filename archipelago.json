@@ -59,15 +59,10 @@ class Smash64World(World):
     settings: ClassVar[Smash64Settings]
 
     def generate_early(self):
-        # Opponent fights are always created. Bonus stages (Break the Targets,
-        # Board the Platforms) are created only when include_bonus_stages is on;
-        # their detection reuses the same (character, stage) snapshot path as the
-        # fights, so the only thing the option controls is whether they exist.
-        include_bonus = bool(self.options.include_bonus_stages.value)
         self.active_locations = {
             name: data
             for name, data in location_table.items()
-            if include_bonus or data["type"] != "bonus_stage"
+            if data["type"] != "bonus_btt" or bool(self.options.include_bonus_stages.value)
         }
 
     def create_regions(self):
@@ -115,12 +110,13 @@ class Smash64World(World):
         # Every item placed at a location must have an integer code for the hosted server.
         # Do not create filler with code=None, or uploaded .archipelago files can crash
         # WebHostLib's LocationStore with: TypeError: an integer is required.
+        filler_item_names = ["Fans Cheers", "Healing Cheers", "Heckling Crowd"]
         filler_count = len(self.active_locations) - locked_goal_location_count - character_item_count
         for _ in range(max(0, filler_count)):
-            self.multiworld.itempool.append(self.create_item("Fans Cheers"))
+            self.multiworld.itempool.append(self.create_item(self.random.choice(filler_item_names)))
 
     def get_filler_item_name(self) -> str:
-        return "Fans Cheers"
+        return self.random.choice(["Fans Cheers", "Healing Cheers", "Heckling Crowd"])
 
     def generate_output(self, output_directory: str):
         patch = Smash64Patch(player=self.player, player_name=self.player_name)
@@ -135,5 +131,6 @@ class Smash64World(World):
             "starting_character": self.options.starting_character.character_name,
             "required_classic_completions": int(self.options.required_classic_completions.value),
             "include_bonus_stages": bool(self.options.include_bonus_stages.value),
+            "death_link": bool(self.options.death_link.value),
             "characters": list(CHARACTERS),
         }

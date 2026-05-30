@@ -43,9 +43,14 @@ class RequiredClassicCompletions(Range):
     default = 8
 
 class IncludeBonusStages(Toggle):
-    """Whether Break the Targets, Board the Platforms, and Race to the Finish are checks."""
+    """Whether Break the Targets checks are included."""
     display_name = "Include Bonus Stages"
     default = 1
+
+class DeathLink(Toggle):
+    """When enabled, running out of stocks in a Classic fight sends a DeathLink, and receiving one removes one stock during a Classic fight."""
+    display_name = "DeathLink"
+    default = 0
 
 @dataclass
 class Smash64Options(PerGameCommonOptions):
@@ -53,3 +58,4 @@ class Smash64Options(PerGameCommonOptions):
     starting_character: StartingCharacter
     required_classic_completions: RequiredClassicCompletions
     include_bonus_stages: IncludeBonusStages
+    death_link: DeathLink

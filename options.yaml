@@ -5,3 +5,4 @@ Super Smash Bros. 64:
   starting_character: Mario
   required_classic_completions: 8
   include_bonus_stages: true
+  death_link: false

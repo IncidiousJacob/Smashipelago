@@ -40,9 +40,12 @@ CLASSIC_FIGHTS = [
     "Master Hand",
 ]
 
+# Bonus/checks backed by separate RAM handling.
+BONUS_FIGHTS = [
+    "Break the Targets",
+]
+
 # Values found by ssb64_1p_tracker.lua, remapped from arena -> fight.
-# Break the Targets, Board the Platforms, Race to the Finish, How to Play,
-# Mushroom Kingdom, and normal Yoshi's Island are not AP checks here.
 # The actual Yoshi Team fight reports stage id 0x0C: Yoshi's Island (no clouds).
 CLASSIC_FIGHT_STAGE_IDS = {
     "Mario Bros.": 0x00,          # Peach's Castle
@@ -62,25 +65,13 @@ CLASSIC_FIGHT_NAME_BY_STAGE_ID = {
     value: name for name, value in CLASSIC_FIGHT_STAGE_IDS.items()
 }
 
-# Bonus stages encountered during 1P/Classic mode. Detection reuses the exact
-# same (character_id, stage_id) snapshot path as the opponent fights; these are
-# only created as locations when the include_bonus_stages option is enabled.
-# Stage IDs come from the same RAM stage byte the fight checks already use.
-BONUS_STAGES = [
-    "Break the Targets",
-    "Board the Platforms",
-    "Race to the Finish",
-]
-
-BONUS_STAGE_IDS = {
-    "Break the Targets": 0x09,
-    "Board the Platforms": 0x0A,
-    "Race to the Finish": 0x0F,
-}
-
-BONUS_STAGE_NAME_BY_STAGE_ID = {
-    value: name for name, value in BONUS_STAGE_IDS.items()
-}
+# Break the Targets uses a separate character byte during the bonus stage.
+# Confirmed by testing:
+#   0x0A4B09 = 0x00 for Mario BTT
+#   0x0A4B09 = 0x02 for Donkey Kong BTT
+#   0x0A4B09 = 0x04 for Luigi BTT
+BTT_CHARACTER_ADDR = 0x000A4B09
+BTT_STATE_ID = 0x35
 
 # Optional human-readable arena labels for client logs/debug only.
 CLASSIC_STAGE_NAME_BY_INTERNAL_ID = {

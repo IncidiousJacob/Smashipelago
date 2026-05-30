@@ -10,7 +10,7 @@ SMASH64_AP_MARKER = b"SM64AP000001"
 SMASH64_PLAYER_NAME_OFFSET = SMASH64_AP_MARKER_OFFSET + len(SMASH64_AP_MARKER)
 SMASH64_PLAYER_NAME_LENGTH = 64
 
-# N64 ROM byte-order headers (first 4 bytes of the ROM).
+# N64 ROM byte-order headers.
 # .z64 = big-endian/native:      80 37 12 40
 # .v64 = byteswapped 16-bit:     37 80 40 12
 # .n64 = little-endian 32-bit:   40 12 37 80
@@ -81,6 +81,7 @@ class Smash64Patch(APAutoPatchInterface):
         if not hasattr(Smash64Patch, "source_data"):
             Smash64Patch.source_data = Smash64Patch.get_source_data()
         return Smash64Patch.source_data
+
 
     def get_manifest(self) -> Dict[str, Any]:
         manifest = super().get_manifest()
