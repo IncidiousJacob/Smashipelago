@@ -59,11 +59,38 @@ class Smash64World(World):
     settings: ClassVar[Smash64Settings]
 
     def generate_early(self):
-        self.active_locations = {
-            name: data
-            for name, data in location_table.items()
-            if data["type"] != "bonus_btt" or bool(self.options.include_bonus_stages.value)
-        }
+        include_bonus = bool(self.options.include_bonus_stages.value)
+        max_difficulty_value = int(self.options.max_difficulty_checks.value)
+        goal_difficulty_value = int(self.options.goal_difficulty.value)
+
+        if goal_difficulty_value > max_difficulty_value:
+            raise Exception(
+                "Smash64 option error: goal_difficulty cannot be higher than max_difficulty_checks. "
+                "Either lower goal_difficulty or raise max_difficulty_checks."
+            )
+
+        max_possible_classic_completions = len(CHARACTERS) * (max_difficulty_value + 1)
+        required_classic_completions = int(self.options.required_classic_completions.value)
+        if required_classic_completions > max_possible_classic_completions:
+            raise Exception(
+                "Smash64 option error: required_classic_completions is higher than the number "
+                "of Master Hand clears that exist with this max_difficulty_checks setting. "
+                f"Requested {required_classic_completions}, but only {max_possible_classic_completions} "
+                "are possible. Raise max_difficulty_checks or lower required_classic_completions."
+            )
+
+        self.active_locations = {}
+        for name, data in location_table.items():
+            if data["type"] == "bonus_btt" and not include_bonus:
+                continue
+
+            # Only include Classic fight checks up through the YAML-selected max
+            # difficulty. Example: max_difficulty_checks: normal includes
+            # Very Easy, Easy, and Normal, but excludes Hard and Very Hard.
+            if data["type"] == "classic_fight" and data.get("difficulty_value", 0) > max_difficulty_value:
+                continue
+
+            self.active_locations[name] = data
 
     def create_regions(self):
         menu = Region("Menu", self.player, self.multiworld)
@@ -86,16 +113,25 @@ class Smash64World(World):
 
         self.multiworld.push_precollected(self.create_item(starting_item_name))
 
-        # Each Master Hand clear is a locked local progression item.
-        # The YAML option required_classic_completions controls how many of
-        # these Classic Mode Clear items are needed for goal completion.
+        # Every Master Hand clear is a local progression token for total Classic
+        # completions. The first Master Hand clear on goal_difficulty also carries
+        # a separate token so the goal can require at least one clear on that difficulty.
+        goal_difficulty_value = int(self.options.goal_difficulty.value)
         locked_goal_location_count = 0
+        placed_goal_difficulty_clear = False
         for location_name, data in self.active_locations.items():
-            if data["fight"] != "Master Hand":
+            if data["type"] != "classic_fight" or data["fight"] != "Master Hand":
                 continue
-            self.multiworld.get_location(location_name, self.player).place_locked_item(
-                self.create_item("Classic Mode Clear")
-            )
+
+            if int(data.get("difficulty_value", 0)) == goal_difficulty_value and not placed_goal_difficulty_clear:
+                self.multiworld.get_location(location_name, self.player).place_locked_item(
+                    self.create_item("Goal Difficulty Clear")
+                )
+                placed_goal_difficulty_clear = True
+            else:
+                self.multiworld.get_location(location_name, self.player).place_locked_item(
+                    self.create_item("Classic Mode Clear")
+                )
             locked_goal_location_count += 1
 
         character_item_count = 0
@@ -107,16 +143,45 @@ class Smash64World(World):
             self.multiworld.itempool.append(self.create_item(item_name))
             character_item_count += 1
 
+        # Start Classic Mode capped at 1 stock. Each Progressive Max Stocks item
+        # raises the allowed cap by one, up to the in-game maximum of 5 stocks.
+        progressive_max_stocks_count = 4
+        for _ in range(progressive_max_stocks_count):
+            self.multiworld.itempool.append(self.create_item("Progressive Max Stocks"))
+
+        # Start Classic Mode difficulty capped at Very Easy. Each Progressive Difficulty
+        # item raises the allowed cap by one, up to Very Hard.
+        progressive_difficulty_count = 4
+        for _ in range(progressive_difficulty_count):
+            self.multiworld.itempool.append(self.create_item("Progressive Difficulty"))
+
         # Every item placed at a location must have an integer code for the hosted server.
         # Do not create filler with code=None, or uploaded .archipelago files can crash
         # WebHostLib's LocationStore with: TypeError: an integer is required.
-        filler_item_names = ["Fans Cheers", "Healing Cheers", "Heckling Crowd"]
-        filler_count = len(self.active_locations) - locked_goal_location_count - character_item_count
-        for _ in range(max(0, filler_count)):
+        stock_thief_count = 15
+        filler_count = (
+            len(self.active_locations)
+            - locked_goal_location_count
+            - character_item_count
+            - progressive_max_stocks_count
+            - progressive_difficulty_count
+            - stock_thief_count
+        )
+        if filler_count < 0:
+            raise Exception(
+                f"Not enough Smash 64 locations to place {stock_thief_count} Stock Thief traps. "
+                f"Need {-filler_count} more filler slots."
+            )
+
+        for _ in range(stock_thief_count):
+            self.multiworld.itempool.append(self.create_item("Stock Thief"))
+
+        filler_item_names = ["Fans Cheers", "Healing Cheers", "Extra Stock", "Heckling Crowd"]
+        for _ in range(filler_count):
             self.multiworld.itempool.append(self.create_item(self.random.choice(filler_item_names)))
 
     def get_filler_item_name(self) -> str:
-        return self.random.choice(["Fans Cheers", "Healing Cheers", "Heckling Crowd"])
+        return self.random.choice(["Fans Cheers", "Healing Cheers", "Extra Stock", "Heckling Crowd"])
 
     def generate_output(self, output_directory: str):
         patch = Smash64Patch(player=self.player, player_name=self.player_name)
@@ -131,6 +196,8 @@ class Smash64World(World):
             "starting_character": self.options.starting_character.character_name,
             "required_classic_completions": int(self.options.required_classic_completions.value),
             "include_bonus_stages": bool(self.options.include_bonus_stages.value),
+            "max_difficulty_checks": int(self.options.max_difficulty_checks.value),
+            "goal_difficulty": int(self.options.goal_difficulty.value),
             "death_link": bool(self.options.death_link.value),
             "characters": list(CHARACTERS),
         }

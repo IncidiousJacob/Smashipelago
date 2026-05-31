@@ -36,16 +36,56 @@ class StartingCharacter(Choice):
         }[int(self.value)]
 
 class RequiredClassicCompletions(Range):
-    """How many character Classic Mode completion checks are needed to finish."""
+    """Total Master Hand clears needed to finish. Max possible depends on max_difficulty_checks."""
     display_name = "Required Classic Mode Completions"
     range_start = 1
-    range_end = 12
+    range_end = 60
     default = 8
 
 class IncludeBonusStages(Toggle):
     """Whether Break the Targets checks are included."""
     display_name = "Include Bonus Stages"
     default = 1
+
+class MaxDifficultyChecks(Choice):
+    """Highest Classic difficulty that has AP checks. Very Easy only includes Very Easy checks; Very Hard includes all difficulty checks."""
+    display_name = "Max Difficulty Checks"
+    option_very_easy = 0
+    option_easy = 1
+    option_normal = 2
+    option_hard = 3
+    option_very_hard = 4
+    default = 4
+
+    @property
+    def difficulty_name(self) -> str:
+        return {
+            0: "Very Easy",
+            1: "Easy",
+            2: "Normal",
+            3: "Hard",
+            4: "Very Hard",
+        }[int(self.value)]
+
+class GoalDifficulty(Choice):
+    """Classic difficulty that Master Hand clears must be on to count toward the goal."""
+    display_name = "Goal Difficulty"
+    option_very_easy = 0
+    option_easy = 1
+    option_normal = 2
+    option_hard = 3
+    option_very_hard = 4
+    default = 0
+
+    @property
+    def difficulty_name(self) -> str:
+        return {
+            0: "Very Easy",
+            1: "Easy",
+            2: "Normal",
+            3: "Hard",
+            4: "Very Hard",
+        }[int(self.value)]
 
 class DeathLink(Toggle):
     """When enabled, running out of stocks in a Classic fight sends a DeathLink, and receiving one removes one stock during a Classic fight."""
@@ -58,4 +98,6 @@ class Smash64Options(PerGameCommonOptions):
     starting_character: StartingCharacter
     required_classic_completions: RequiredClassicCompletions
     include_bonus_stages: IncludeBonusStages
+    max_difficulty_checks: MaxDifficultyChecks
+    goal_difficulty: GoalDifficulty
     death_link: DeathLink

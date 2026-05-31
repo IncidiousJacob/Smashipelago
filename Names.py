@@ -23,6 +23,22 @@ CHARACTER_NAME_BY_INTERNAL_ID = {
     value: name for name, value in CHARACTER_INTERNAL_IDS.items()
 }
 
+DIFFICULTIES = [
+    "Very Easy",
+    "Easy",
+    "Normal",
+    "Hard",
+    "Very Hard",
+]
+
+DIFFICULTY_VALUE_BY_NAME = {
+    name: index for index, name in enumerate(DIFFICULTIES)
+}
+
+DIFFICULTY_NAME_BY_VALUE = {
+    value: name for name, value in DIFFICULTY_VALUE_BY_NAME.items()
+}
+
 # 1P Game / Classic checks are named by the opponent/fight, not by the arena.
 # The client still uses the stage byte from RAM as the stable signal, then maps
 # that stage byte to the fight that takes place there.
