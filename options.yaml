@@ -1,6 +1,44 @@
+# starting_character can be any listed character, or random.
+# random chooses from character_checks only.
 starting_character: mario
+# Pick exactly which characters have locations, Fighter Passes, and are allowed by the character lock.
+# You may choose any amount, but starting_character must be included unless it is random.
+# Examples:
+# character_checks: [mario]
+# character_checks: [mario, luigi, kirby]
+# character_checks: [mario, donkey_kong, link, samus, yoshi, kirby, fox, pikachu, luigi, captain_falcon, ness, jigglypuff]
+character_checks:
+  - mario
+  - donkey_kong
+  - link
+  - samus
+  - yoshi
+  - kirby
+  - fox
+  - pikachu
+  - luigi
+  - captain_falcon
+  - ness
+  - jigglypuff
 required_classic_completions: 8
 include_bonus_stages: true
-max_difficulty_checks: very_hard
+starting_max_stocks: 1
+# Pick exactly which Classic difficulties have locations and are selectable.
+# You may choose any amount.
+# Examples:
+# difficulty_checks: [hard]
+# difficulty_checks: [easy, hard]
+# difficulty_checks: [very_easy, easy, normal, hard, very_hard]
+difficulty_checks:
+  - very_easy
+  - easy
+  - normal
+  - hard
+  - very_hard
+auto_check_lower_difficulties: false
 goal_difficulty: very_easy
+heckling_crowd_count: 5
+stock_thief_count: 5
 death_link: false
+damage_link: false
+energy_link: false

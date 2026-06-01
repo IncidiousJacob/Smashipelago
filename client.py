@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Set
 import time
+import Utils
 
 from NetUtils import ClientStatus
 import worlds._bizhawk as bizhawk
@@ -44,7 +45,33 @@ P1_STOCKS_ADDR = 0x000A4B43
 MAX_STOCKS_SELECT_ADDR = 0x00138FBB
 DIFFICULTY_SELECT_ADDR = 0x00138FB7
 
+ENERGY_LINK_KEY = "EnergyLink"
+ENERGY_LINK_FIGHT_DEPOSIT = 10
+ENERGY_LINK_CLASSIC_CLEAR_DEPOSIT = 50
+ENERGY_LINK_HEAL_5_COST = 5
+ENERGY_LINK_HEAL_10_COST = 10
+ENERGY_LINK_HEAL_20_COST = 20
+ENERGY_LINK_HEAL_50_COST = 50
+ENERGY_LINK_STOCK_COST = 50
+
+DAMAGE_LINK_SEND_COOLDOWN_SECONDS = 10.0
+DAMAGE_LINK_AFTER_CHECK_BLOCK_SECONDS = 30.0
+DAMAGE_LINK_FIGHT_START_GRACE_SECONDS = 3.0
+
+
+def _energy_link_key(ctx: "BizHawkClientContext") -> str:
+    """Use Archipelago's standard shared EnergyLink storage key.
+
+    Factorio and the common client use the plain key "EnergyLink".
+    The previous Smash64 builds used a team-scoped key like "EnergyLink0",
+    which isolated Smash64 from the real shared pool and prevented it from
+    seeing EnergyLink sent by other games.
+    """
+    return ENERGY_LINK_KEY
+
+
 STATE_IN_BATTLE = 0x01
+STATE_LOADING = 0x0E
 STATE_RESULTS = 0x33
 STATE_BTT = BTT_STATE_ID
 
@@ -70,13 +97,17 @@ def cmd_smash64_characters(self) -> None:
         logger.info("Smash64 client is not active yet. Load the patched ROM first.")
         return
 
+    enabled_names = handler.get_enabled_character_names(self.ctx)
     unlocked_names = handler.get_unlocked_character_names(self.ctx)
-    unlocked = [name for name in CHARACTERS if name in unlocked_names]
-    locked = [name for name in CHARACTERS if name not in unlocked_names]
+    unlocked = [name for name in CHARACTERS if name in enabled_names and name in unlocked_names]
+    locked = [name for name in CHARACTERS if name in enabled_names and name not in unlocked_names]
 
-    logger.info(f"Unlocked characters ({len(unlocked)}/{len(CHARACTERS)}): "
+    logger.info(f"Unlocked characters ({len(unlocked)}/{len(enabled_names)}): "
                 f"{', '.join(unlocked) if unlocked else 'none'}")
     logger.info(f"Locked characters: {', '.join(locked) if locked else 'none'}")
+    disabled = [name for name in CHARACTERS if name not in enabled_names]
+    if disabled:
+        logger.info(f"Disabled by YAML: {', '.join(disabled)}")
 
     fallback_value = handler._get_character_fallback_value(self.ctx)
     if fallback_value in CHARACTER_NAME_BY_SELECT_VALUE:
@@ -106,6 +137,109 @@ def cmd_smash64_deathlink(self) -> None:
     logger.info(f"DeathLink {'ON' if handler.death_link_user_enabled else 'OFF'}")
 
 
+def cmd_smash64_goal(self) -> None:
+    """Show Classic Mode goal progress."""
+    from CommonClient import logger
+
+    handler = getattr(self.ctx, "client_handler", None)
+    if handler is None or not hasattr(handler, "local_checked_locations"):
+        logger.info("Smash64 client is not active yet. Load the patched ROM first.")
+        return
+
+    slot_data = getattr(self.ctx, "slot_data", None) or {}
+    required = int(slot_data.get("required_classic_completions", 8) or 8)
+    goal_difficulty = int(slot_data.get("goal_difficulty", 0) or 0)
+    goal_difficulty_name = DIFFICULTY_NAME_BY_VALUE.get(goal_difficulty, f"Unknown {goal_difficulty}")
+
+    checked = set(getattr(self.ctx, "checked_locations", set()) or set())
+    checked.update(getattr(self.ctx, "locations_checked", set()) or set())
+    checked.update(getattr(handler, "local_checked_locations", set()) or set())
+
+    total_master_hand_clears = len(master_hand_location_ids.intersection(checked))
+    goal_master_hand_ids = master_hand_location_ids_by_difficulty.get(goal_difficulty, set())
+    goal_difficulty_clears = len(goal_master_hand_ids.intersection(checked))
+    has_goal_difficulty_clear = goal_difficulty_clears > 0
+
+    logger.info(
+        f"Classic Mode clears: {total_master_hand_clears}/{required} "
+        f"({'complete' if total_master_hand_clears >= required else 'incomplete'})"
+    )
+    logger.info(
+        f"Goal difficulty clear ({goal_difficulty_name}): "
+        f"{'yes' if has_goal_difficulty_clear else 'no'} "
+        f"({goal_difficulty_clears} clear{'s' if goal_difficulty_clears != 1 else ''})"
+    )
+
+    if total_master_hand_clears >= required and has_goal_difficulty_clear:
+        logger.info("Goal requirement met.")
+    else:
+        remaining = max(0, required - total_master_hand_clears)
+        if remaining > 0:
+            logger.info(f"Need {remaining} more Classic Mode clear{'s' if remaining != 1 else ''}.")
+        if not has_goal_difficulty_clear:
+            logger.info(f"Need at least one Master Hand clear on {goal_difficulty_name}.")
+
+
+def _smash64_energylink_handler(ctx: "BizHawkClientContext"):
+    handler = getattr(ctx, "client_handler", None)
+    if handler is None or not hasattr(handler, "queue_energy_link_withdraw"):
+        return None
+    return handler
+
+
+def cmd_smash64_energylink(self) -> None:
+    """Show EnergyLink balance and withdraw commands."""
+    from CommonClient import logger
+
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is None:
+        logger.info("Smash64 client is not active yet. Load the patched ROM first.")
+        return
+
+    slot_data = getattr(self.ctx, "slot_data", None) or {}
+    if not bool(slot_data.get("energy_link", False)):
+        logger.info("EnergyLink is disabled in this seed. Set energy_link: true in the YAML.")
+        return
+
+    logger.info(f"EnergyLink balance: {handler.energy_link_value}")
+    logger.info("Withdraw commands: /el_heal5, /el_heal10, /el_heal20, /el_heal50, /el_stock")
+
+
+def cmd_smash64_el_heal5(self) -> None:
+    """Spend 5 EnergyLink to heal 5%."""
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is not None:
+        handler.queue_energy_link_withdraw(self.ctx, "heal", 5, ENERGY_LINK_HEAL_5_COST)
+
+
+def cmd_smash64_el_heal10(self) -> None:
+    """Spend 10 EnergyLink to heal 10%."""
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is not None:
+        handler.queue_energy_link_withdraw(self.ctx, "heal", 10, ENERGY_LINK_HEAL_10_COST)
+
+
+def cmd_smash64_el_heal20(self) -> None:
+    """Spend 20 EnergyLink to heal 20%."""
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is not None:
+        handler.queue_energy_link_withdraw(self.ctx, "heal", 20, ENERGY_LINK_HEAL_20_COST)
+
+
+def cmd_smash64_el_heal50(self) -> None:
+    """Spend 50 EnergyLink to heal 50%."""
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is not None:
+        handler.queue_energy_link_withdraw(self.ctx, "heal", 50, ENERGY_LINK_HEAL_50_COST)
+
+
+def cmd_smash64_el_stock(self) -> None:
+    """Spend 50 EnergyLink to gain one stock in the current/next Classic fight."""
+    handler = _smash64_energylink_handler(self.ctx)
+    if handler is not None:
+        handler.queue_energy_link_withdraw(self.ctx, "stock", 1, ENERGY_LINK_STOCK_COST)
+
+
 def install_smash64_command_processor(ctx: "BizHawkClientContext") -> None:
     """Register Smash64-specific local BizHawk client commands."""
     commands = getattr(getattr(ctx, "command_processor", None), "commands", None)
@@ -114,6 +248,13 @@ def install_smash64_command_processor(ctx: "BizHawkClientContext") -> None:
 
     commands["characters"] = cmd_smash64_characters
     commands["deathlink"] = cmd_smash64_deathlink
+    commands["energylink"] = cmd_smash64_energylink
+    commands["goal"] = cmd_smash64_goal
+    commands["el_heal5"] = cmd_smash64_el_heal5
+    commands["el_heal10"] = cmd_smash64_el_heal10
+    commands["el_heal20"] = cmd_smash64_el_heal20
+    commands["el_heal50"] = cmd_smash64_el_heal50
+    commands["el_stock"] = cmd_smash64_el_stock
 
 
 
@@ -142,9 +283,21 @@ class Smash64Client(BizHawkClient):
     death_link_enabled: bool
     death_link_user_enabled: bool
     death_link_status_sent: bool
+    damage_link_enabled: bool
+    damage_link_status_sent: bool
+    last_damage_percent: int | None
+    pending_damage_link_hits: int
+    damage_link_send_bucket: int | None
+    energy_link_enabled: bool
+    energy_link_status_sent: bool
+    energy_link_notify_sent: bool
+    energy_link_value: int
+    energy_link_spent_pending_reply: int
+    pending_energy_link_withdraws: list[tuple[str, int, int]]
     last_stock_value: int | None
     last_max_stock_cap_value: int | None
     last_difficulty_cap_value: int | None
+    last_selected_difficulty_value: int | None
     sent_deathlink_for_current_stockout: bool
     pending_deathlinks: int
     last_deathlink_time: float
@@ -174,10 +327,24 @@ class Smash64Client(BizHawkClient):
         self.death_link_enabled = False
         self.death_link_user_enabled = True
         self.death_link_status_sent = False
+        self.damage_link_enabled = False
+        self.damage_link_status_sent = False
+        self.last_damage_percent = None
+        self.pending_damage_link_hits = 0
+        self.damage_link_send_bucket = None
+        self.damage_link_last_send_time = 0.0
+        self.damage_link_block_until = 0.0
+        self.damage_link_fight_started_at = 0.0
+        self.energy_link_enabled = False
+        self.energy_link_status_sent = False
+        self.energy_link_notify_sent = False
+        self.energy_link_value = 0
+        self.energy_link_spent_pending_reply = 0
+        self.pending_energy_link_withdraws = []
         self.last_stock_value = None
         self.last_max_stock_cap_value = None
         self.last_difficulty_cap_value = None
-        self.last_difficulty_cap_value = None
+        self.last_selected_difficulty_value = None
         self.sent_deathlink_for_current_stockout = False
         self.pending_deathlinks = 0
         self.last_deathlink_time = 0.0
@@ -243,6 +410,20 @@ class Smash64Client(BizHawkClient):
         self.death_link_enabled = False
         self.death_link_user_enabled = True
         self.death_link_status_sent = False
+        self.damage_link_enabled = False
+        self.damage_link_status_sent = False
+        self.last_damage_percent = None
+        self.pending_damage_link_hits = 0
+        self.damage_link_send_bucket = None
+        self.damage_link_last_send_time = 0.0
+        self.damage_link_block_until = 0.0
+        self.damage_link_fight_started_at = 0.0
+        self.energy_link_enabled = False
+        self.energy_link_status_sent = False
+        self.energy_link_notify_sent = False
+        self.energy_link_value = 0
+        self.energy_link_spent_pending_reply = 0
+        self.pending_energy_link_withdraws = []
         self.last_stock_value = None
         self.last_max_stock_cap_value = None
         self.sent_deathlink_for_current_stockout = False
@@ -261,21 +442,85 @@ class Smash64Client(BizHawkClient):
         if self.player_name:
             ctx.auth = self.player_name
 
+    def get_enabled_character_names(self, ctx: "BizHawkClientContext") -> Set[str]:
+        """Return the characters included by this seed's character_checks option.
+
+        Older seeds did not send this slot-data field, so default to all
+        characters for compatibility.
+        """
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        raw_characters = slot_data.get("characters", None)
+        if raw_characters is None:
+            return set(CHARACTERS)
+
+        enabled = {name for name in raw_characters if name in CHARACTER_SELECT_VALUE_BY_NAME}
+        return enabled or set(CHARACTERS)
+
+    def get_enabled_character_values(self, ctx: "BizHawkClientContext") -> Set[int]:
+        return {
+            CHARACTER_SELECT_VALUE_BY_NAME[name]
+            for name in self.get_enabled_character_names(ctx)
+            if name in CHARACTER_SELECT_VALUE_BY_NAME
+        }
+
+
+    def _character_from_received_item(self, ctx: "BizHawkClientContext", item_id: int) -> str | None:
+        """Return the Smash64 character unlocked by a received Fighter Pass.
+
+        Older/newer builds have changed the item table a few times, so do not
+        rely only on the local hard-coded numeric map.  First try the exact
+        current numeric ID map, then fall back to Archipelago's item-name
+        lookup and parse names like "Fox Fighter Pass".
+        """
+        character = CHARACTER_BY_ITEM_ID.get(item_id)
+        if character is not None:
+            return character
+
+        item_name = None
+        item_names = getattr(ctx, "item_names", None)
+        if item_names is not None:
+            for method_name in ("lookup_in_game", "lookup_in_slot", "lookup_in_world"):
+                method = getattr(item_names, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    if method_name == "lookup_in_slot":
+                        item_name = method(item_id, getattr(ctx, "slot", None))
+                    else:
+                        item_name = method(item_id)
+                except Exception:
+                    item_name = None
+                if item_name:
+                    break
+
+        if isinstance(item_name, str) and item_name.endswith(" Fighter Pass"):
+            candidate = item_name[:-len(" Fighter Pass")]
+            if candidate in CHARACTER_SELECT_VALUE_BY_NAME:
+                return candidate
+
+        return None
+
     def get_unlocked_character_names(self, ctx: "BizHawkClientContext") -> Set[str]:
         unlocked: Set[str] = set()
+        enabled = self.get_enabled_character_names(ctx)
 
         slot_data = getattr(ctx, "slot_data", None) or {}
         starting_character = slot_data.get("starting_character", "Mario")
-        if starting_character in CHARACTER_SELECT_VALUE_BY_NAME:
+        if starting_character in enabled and starting_character in CHARACTER_SELECT_VALUE_BY_NAME:
             unlocked.add(starting_character)
 
         for network_item in getattr(ctx, "items_received", []):
-            character = CHARACTER_BY_ITEM_ID.get(network_item.item)
-            if character is not None:
+            character = self._character_from_received_item(ctx, int(network_item.item))
+            if character is not None and character in enabled:
                 unlocked.add(character)
 
         if not unlocked:
-            unlocked.add("Mario")
+            # Compatibility / malformed slot data fallback. Prefer the first
+            # enabled character in the game's stable character order.
+            for character in CHARACTERS:
+                if character in enabled:
+                    unlocked.add(character)
+                    break
 
         return unlocked
 
@@ -445,6 +690,152 @@ class Smash64Client(BizHawkClient):
                 await ctx.send_msgs([{"cmd": "ConnectUpdate", "tags": list(desired_tags)}])
             self.death_link_status_sent = True
 
+    async def _sync_damage_link_status(self, ctx: "BizHawkClientContext") -> None:
+        """Keep the room/server SharedDamage tag in sync with the slot option."""
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        enabled = bool(slot_data.get("damage_link", False))
+        self.damage_link_enabled = enabled
+
+        desired_tags = set(getattr(ctx, "tags", set()) or set())
+        if enabled:
+            desired_tags.add("SharedDamage")
+        else:
+            desired_tags.discard("SharedDamage")
+
+        current_tags = set(getattr(ctx, "tags", set()) or set())
+        if current_tags != desired_tags or not self.damage_link_status_sent:
+            ctx.tags = desired_tags
+            if getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed:
+                await ctx.send_msgs([{"cmd": "ConnectUpdate", "tags": list(desired_tags)}])
+            self.damage_link_status_sent = True
+
+    async def _sync_energy_link_status(self, ctx: "BizHawkClientContext") -> None:
+        """Keep the room/server EnergyLink tag and data-storage subscription in sync."""
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        enabled = bool(slot_data.get("energy_link", False))
+        self.energy_link_enabled = enabled
+
+        desired_tags = set(getattr(ctx, "tags", set()) or set())
+        if enabled:
+            desired_tags.add("EnergyLink")
+        else:
+            desired_tags.discard("EnergyLink")
+
+        current_tags = set(getattr(ctx, "tags", set()) or set())
+        if current_tags != desired_tags or not self.energy_link_status_sent:
+            ctx.tags = desired_tags
+            if getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed:
+                await ctx.send_msgs([{"cmd": "ConnectUpdate", "tags": list(desired_tags)}])
+            self.energy_link_status_sent = True
+
+        if enabled and not self.energy_link_notify_sent:
+            if getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed:
+                await ctx.send_msgs([
+                    {"cmd": "SetNotify", "keys": [_energy_link_key(ctx)]},
+                    {"cmd": "Get", "keys": [_energy_link_key(ctx)]},
+                ])
+                self.energy_link_notify_sent = True
+        elif not enabled:
+            self.energy_link_notify_sent = False
+            self.pending_energy_link_withdraws.clear()
+
+    async def _deposit_energy_link(self, ctx: "BizHawkClientContext", amount: int) -> None:
+        if amount <= 0 or not self.energy_link_enabled:
+            return
+        if not (getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed):
+            return
+        await ctx.send_msgs([{
+            "cmd": "Set",
+            "key": _energy_link_key(ctx),
+            "default": 0,
+            "want_reply": True,
+            "operations": [{"operation": "add", "value": int(amount)}],
+        }])
+        from CommonClient import logger
+        logger.info(f"[Smash64] Deposited {int(amount)} EnergyLink.")
+
+    async def _spend_energy_link(self, ctx: "BizHawkClientContext", amount: int) -> bool:
+        if amount <= 0 or not self.energy_link_enabled:
+            return False
+        if self.energy_link_value - self.energy_link_spent_pending_reply < amount:
+            return False
+        if not (getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed):
+            return False
+        self.energy_link_spent_pending_reply += amount
+        await ctx.send_msgs([{
+            "cmd": "Set",
+            "key": _energy_link_key(ctx),
+            "default": 0,
+            "want_reply": True,
+            "operations": [{"operation": "add", "value": -int(amount)}],
+        }])
+        return True
+
+    def queue_energy_link_withdraw(self, ctx: "BizHawkClientContext", effect_type: str, amount: int, cost: int) -> None:
+        """Called by local /el_* commands. The actual write waits for a fight."""
+        from CommonClient import logger
+
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        if not bool(slot_data.get("energy_link", False)):
+            logger.info("EnergyLink is disabled in this seed. Set energy_link: true in the YAML.")
+            return
+        if not self.energy_link_enabled:
+            logger.info("EnergyLink is not connected/synced yet. Try again after connecting.")
+            return
+        available = self.energy_link_value - self.energy_link_spent_pending_reply
+        if available < cost:
+            logger.info(f"Not enough EnergyLink. Need {cost}, have {max(0, available)}.")
+            return
+
+        self.pending_energy_link_withdraws.append((effect_type, int(amount), int(cost)))
+        logger.info(f"Queued EnergyLink {effect_type} {amount} for {cost}. It will apply in a Classic fight.")
+
+    async def handle_energy_link(self, ctx: "BizHawkClientContext") -> None:
+        await self._sync_energy_link_status(ctx)
+        if not self.energy_link_enabled:
+            return
+        if not self.pending_energy_link_withdraws:
+            return
+
+        game_state, stage_id = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+            (GAME_STATE_ADDR, 1, "RDRAM"),
+            (CLASSIC_STAGE_ADDR, 1, "RDRAM"),
+        ])]
+        if not self._is_classic_fight_state(game_state, stage_id):
+            return
+
+        remaining_withdraws: list[tuple[str, int, int]] = []
+        for effect_type, amount, cost in self.pending_energy_link_withdraws:
+            spent = await self._spend_energy_link(ctx, cost)
+            if not spent:
+                remaining_withdraws.append((effect_type, amount, cost))
+                continue
+
+            if effect_type == "heal":
+                # Smash percent is damage, so healing subtracts damage percent.
+                self.pending_health_delta -= amount
+            elif effect_type == "stock":
+                self.pending_stock_delta += amount
+
+        self.pending_energy_link_withdraws = remaining_withdraws
+
+    async def _send_damage_link(self, ctx: "BizHawkClientContext", damage_points: int) -> None:
+        if damage_points <= 0:
+            return
+        source = getattr(ctx, "auth", None) or self.player_name or "Super Smash Bros. 64 Player"
+        await ctx.send_msgs([{
+            "cmd": "Bounce",
+            "tags": ["SharedDamage"],
+            "data": {
+                "time": time.time(),
+                "uuid": Utils.get_unique_identifier(),
+                "source": source,
+                "damage_points": int(damage_points),
+            },
+        }])
+        from CommonClient import logger
+        logger.info(f"[Smash64] Sent DamageLink bounce packet: {int(damage_points)} damage points.")
+
     async def _send_death_link(self, ctx: "BizHawkClientContext") -> None:
         source = getattr(ctx, "auth", None) or self.player_name or "Super Smash Bros. 64 Player"
         await ctx.send_msgs([{
@@ -470,11 +861,17 @@ class Smash64Client(BizHawkClient):
         The player starts capped at 0. Each Progressive Max Stocks item raises
         the cap by one, maxing at 4.
         """
+        # Slot data stores the YAML option as the human stock count, 1-5.
+        # The game stores the selector as 0-4, so convert by subtracting 1.
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        starting_max_stocks = int(slot_data.get("starting_max_stocks", 1) or 1)
+        base_cap = max(0, min(4, starting_max_stocks - 1))
+
         count = 0
         for network_item in getattr(ctx, "items_received", []):
             if network_item.item == PROGRESSIVE_MAX_STOCKS_ID:
                 count += 1
-        return max(0, min(4, count))
+        return max(0, min(4, base_cap + count))
 
     async def handle_progressive_max_stocks(self, ctx: "BizHawkClientContext") -> None:
         max_allowed = self._get_max_stock_cap_value(ctx)
@@ -493,37 +890,93 @@ class Smash64Client(BizHawkClient):
         # raise the current fight's stocks above the AP max-stock cap. The cap
         # only controls the Classic stock selector before the fight begins.
 
-    def _get_difficulty_cap_value(self, ctx: "BizHawkClientContext") -> int:
-        """Return the highest allowed Classic difficulty selector value.
+    def _get_enabled_difficulty_values(self, ctx: "BizHawkClientContext") -> set[int]:
+        """Return the exact Classic difficulties included by the YAML.
 
-        Smash 64 stores difficulty as:
-            0 = Very Easy
-            1 = Easy
-            2 = Normal
-            3 = Hard
-            4 = Very Hard
-
-        The player starts capped at 0. Each Progressive Difficulty item raises
-        the cap by one, maxing at 4.
+        Values match Smash 64's selector byte:
+            0 = Very Easy, 1 = Easy, 2 = Normal, 3 = Hard, 4 = Very Hard
         """
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        raw_values = slot_data.get("difficulty_checks", None)
+
+        if raw_values is None:
+            # Compatibility with older generated seeds.
+            max_value = int(slot_data.get("max_difficulty_checks", 4))
+            return {value for value in range(0, max(0, min(4, max_value)) + 1)}
+
+        values = set()
+        for value in raw_values:
+            try:
+                difficulty_value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= difficulty_value <= 4:
+                values.add(difficulty_value)
+
+        return values or {0}
+
+    def _get_difficulty_cap_value(self, ctx: "BizHawkClientContext") -> int:
+        """Return the highest currently unlocked Classic difficulty value.
+
+        difficulty_checks may start above Very Easy. In that case the apworld
+        precollects enough Progressive Difficulty items and also sends
+        starting_difficulty_cap in slot data, so the client does not force the
+        selector down to Very Easy for hard-only/normal-only seeds.
+        """
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        base_cap = int(slot_data.get("starting_difficulty_cap", 0))
+
         count = 0
         for network_item in getattr(ctx, "items_received", []):
             if network_item.item == PROGRESSIVE_DIFFICULTY_ID:
                 count += 1
-        return max(0, min(4, count))
+        return max(0, min(4, base_cap + count))
+
+    def _get_allowed_difficulty_for_selector(self, ctx: "BizHawkClientContext") -> int:
+        """Return the highest YAML-enabled difficulty that is currently unlocked."""
+        enabled = sorted(self._get_enabled_difficulty_values(ctx))
+        cap = self._get_difficulty_cap_value(ctx)
+
+        unlocked_enabled = [value for value in enabled if value <= cap]
+        if unlocked_enabled:
+            return max(unlocked_enabled)
+
+        # This should only happen with malformed slot data. Prefer the lowest
+        # enabled difficulty over a difficulty that has no checks.
+        return min(enabled)
 
     async def handle_progressive_difficulty(self, ctx: "BizHawkClientContext") -> None:
         max_allowed = self._get_difficulty_cap_value(ctx)
         self.last_difficulty_cap_value = max_allowed
 
-        current_select = (await bizhawk.read(ctx.bizhawk_ctx, [
-            (DIFFICULTY_SELECT_ADDR, 1, "RDRAM"),
-        ]))[0][0]
+        enabled = self._get_enabled_difficulty_values(ctx)
+        target_select = self._get_allowed_difficulty_for_selector(ctx)
 
-        # Clamp the Classic difficulty selector/menu value. If the player tries
-        # to choose a harder difficulty than AP currently allows, force it back down.
-        if 0 <= current_select <= 4 and current_select > max_allowed:
-            await self._burst_write_u8(ctx, DIFFICULTY_SELECT_ADDR, max_allowed, repeats=12)
+        game_state, current_select = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+            (GAME_STATE_ADDR, 1, "RDRAM"),
+            (DIFFICULTY_SELECT_ADDR, 1, "RDRAM"),
+        ])]
+
+        # 0x138FB7 is the menu difficulty selector. During the actual Classic
+        # fight/result screens the byte can read back as 0, which made every
+        # clear look like Very Easy. Only learn the selected difficulty while
+        # we are outside Classic gameplay states; then the fight-check handler
+        # snapshots this remembered value when the battle starts.
+        in_classic_gameplay_state = game_state in {STATE_IN_BATTLE, STATE_LOADING, STATE_RESULTS, STATE_BTT}
+
+        # Force the Classic difficulty selector to one of the exact YAML-enabled
+        # difficulties. Also prevent selecting an enabled difficulty before the
+        # corresponding Progressive Difficulty cap has been reached.
+        if 0 <= current_select <= 4 and (current_select not in enabled or current_select > max_allowed):
+            await self._burst_write_u8(ctx, DIFFICULTY_SELECT_ADDR, target_select, repeats=12)
+            if not in_classic_gameplay_state:
+                self.last_selected_difficulty_value = target_select
+        elif 0 <= current_select <= 4 and current_select in enabled and current_select <= max_allowed:
+            if not in_classic_gameplay_state:
+                self.last_selected_difficulty_value = current_select
+
+        if self.last_selected_difficulty_value is None:
+            self.last_selected_difficulty_value = target_select
 
     async def handle_death_link(self, ctx: "BizHawkClientContext") -> None:
         await self._sync_death_link_status(ctx)
@@ -572,32 +1025,72 @@ class Smash64Client(BizHawkClient):
         self.last_stock_value = stocks
 
     async def on_package(self, ctx: "BizHawkClientContext", cmd: str, args: dict) -> None:
-        if cmd != "Bounced" or not self.death_link_enabled:
+        if cmd == "Retrieved":
+            keys = args.get("keys", {}) or {}
+            energy_key = _energy_link_key(ctx)
+            if energy_key in keys:
+                try:
+                    self.energy_link_value = int(keys.get(energy_key, 0) or 0)
+                except (TypeError, ValueError):
+                    self.energy_link_value = 0
             return
 
-        if "DeathLink" not in args.get("tags", []):
+        if cmd == "SetReply" and args.get("key") == _energy_link_key(ctx):
+            try:
+                self.energy_link_value = int(args.get("value", 0) or 0)
+            except (TypeError, ValueError):
+                self.energy_link_value = 0
+            # A SetReply for our spend/deposit means the server has caught up;
+            # clear local pending spend accounting so commands see the real balance.
+            self.energy_link_spent_pending_reply = 0
             return
 
+        if cmd != "Bounced":
+            return
+
+        tags = args.get("tags", []) or []
         data = args.get("data", {}) or {}
-        death_time = float(data.get("time", 0.0) or 0.0)
-        if death_time <= self.last_deathlink_time:
-            return
-
         source = data.get("source")
         own_source = getattr(ctx, "auth", None) or self.player_name
-        self.last_deathlink_time = death_time
 
-        if source == own_source:
+        if "DeathLink" in tags and self.death_link_enabled:
+            death_time = float(data.get("time", 0.0) or 0.0)
+            if death_time <= self.last_deathlink_time:
+                return
+
+            self.last_deathlink_time = death_time
+            if source != own_source:
+                self.pending_deathlinks += 1
             return
 
-        self.pending_deathlinks += 1
+        if "SharedDamage" in tags and self.damage_link_enabled:
+            if source == own_source:
+                return
 
-    async def _send_location_check_once(self, ctx: "BizHawkClientContext", location_id: int) -> None:
+            try:
+                damage_points = int(data.get("damage_points", 0) or 0)
+            except (TypeError, ValueError):
+                return
+
+            # In this Smash 64 implementation, each received SharedDamage packet
+            # applies exactly +1% damage, regardless of the packet's damage_points.
+            # The value only needs to be a positive integer to be accepted.
+            if damage_points > 0:
+                self.pending_damage_link_hits += 1
+
+    async def _send_location_check_once(self, ctx: "BizHawkClientContext", location_id: int) -> bool:
         already_checked = set(getattr(ctx, "checked_locations", set()))
         already_checked.update(getattr(ctx, "locations_checked", set()))
         if location_id not in self.local_checked_locations and location_id not in already_checked:
             self.local_checked_locations.add(location_id)
             await ctx.send_msgs([{"cmd": "LocationChecks", "locations": [location_id]}])
+            # Hard failsafe: after any check is sent, do not allow DamageLink
+            # to send from stale/inter-stage damage changes for 30 seconds.
+            self.damage_link_block_until = time.monotonic() + DAMAGE_LINK_AFTER_CHECK_BLOCK_SECONDS
+            self.last_damage_percent = None
+            self.damage_link_send_bucket = None
+            return True
+        return False
 
     async def _write_p1_percent_damage(self, ctx: "BizHawkClientContext", value: int, repeats: int = 8) -> None:
         """Write the P1 percent/damage byte through both useful BizHawk domains.
@@ -617,6 +1110,75 @@ class Smash64Client(BizHawkClient):
                 ])
             except bizhawk.RequestFailedError:
                 pass
+
+    async def handle_damage_link(self, ctx: "BizHawkClientContext") -> None:
+        await self._sync_damage_link_status(ctx)
+        if not self.damage_link_enabled:
+            self.last_damage_percent = None
+            self.damage_link_send_bucket = None
+            return
+
+        game_state, current_damage = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+            (GAME_STATE_ADDR, 1, "RDRAM"),
+            (P1_HEALTH_ADDR, 1, "RDRAM"),
+        ])]
+
+        now = time.monotonic()
+
+        # Only watch/send during real fights. Any other state resets the damage
+        # baseline so menu/results/loading memory cannot produce bounce spam.
+        if game_state != STATE_IN_BATTLE:
+            self.last_damage_percent = None
+            self.damage_link_send_bucket = None
+            self.damage_link_fight_started_at = 0.0
+            return
+
+        if self.damage_link_fight_started_at <= 0.0:
+            self.damage_link_fight_started_at = now
+            self.last_damage_percent = int(current_damage)
+            self.damage_link_send_bucket = int(current_damage) // 10
+            return
+
+        current_damage = int(current_damage)
+        current_bucket = current_damage // 10
+
+        if self.last_damage_percent is None:
+            self.last_damage_percent = current_damage
+            self.damage_link_send_bucket = current_bucket
+        elif current_damage < self.last_damage_percent:
+            # Damage decreased because of healing/new stock/new fight; reset baseline.
+            self.last_damage_percent = current_damage
+            self.damage_link_send_bucket = current_bucket
+        else:
+            previous_bucket = self.damage_link_send_bucket
+            if previous_bucket is None:
+                previous_bucket = self.last_damage_percent // 10
+
+            crossed_ten_percent = current_bucket > previous_bucket
+            cooldown_ready = now >= self.damage_link_block_until and now >= (self.damage_link_last_send_time + DAMAGE_LINK_SEND_COOLDOWN_SECONDS)
+            fight_grace_over = now >= (self.damage_link_fight_started_at + DAMAGE_LINK_FIGHT_START_GRACE_SECONDS)
+
+            if crossed_ten_percent:
+                # Always move the bucket forward, even if cooldown blocks the send.
+                # This prevents one old threshold crossing from firing later between
+                # stages or after the 30 second post-check block expires.
+                self.damage_link_send_bucket = current_bucket
+
+                if cooldown_ready and fight_grace_over:
+                    await self._send_damage_link(ctx, 10)
+                    self.damage_link_last_send_time = now
+
+            self.last_damage_percent = current_damage
+
+        # Receiving DamageLink is independent from sending cooldowns. Each valid
+        # SharedDamage packet adds exactly 1% damage once the player is in a fight.
+        while self.pending_damage_link_hits > 0:
+            live_damage = (await bizhawk.read(ctx.bizhawk_ctx, [(P1_HEALTH_ADDR, 1, "RDRAM")]))[0][0]
+            new_damage = max(0, min(255, live_damage + 1))
+            await self._write_p1_percent_damage(ctx, new_damage, repeats=8)
+            self.pending_damage_link_hits -= 1
+            self.last_damage_percent = new_damage
+            self.damage_link_send_bucket = new_damage // 10
 
     async def handle_health_effect_items(self, ctx: "BizHawkClientContext") -> None:
         """Queue health/damage filler effects and apply them once P1 is in a fight.
@@ -708,18 +1270,36 @@ class Smash64Client(BizHawkClient):
         if game_state == STATE_IN_BATTLE and self.prev_game_state != STATE_IN_BATTLE:
             self.snapshot_stage = stage_id
             self.snapshot_char = char_id
-            self.snapshot_difficulty = difficulty_value
+
+            # Use the remembered menu difficulty, not the raw selector byte while
+            # in battle. The raw byte can become 0 in fights, which incorrectly
+            # sends only Very Easy checks.
+            enabled_difficulties = self._get_enabled_difficulty_values(ctx)
+            remembered_difficulty = self.last_selected_difficulty_value
+            if remembered_difficulty not in enabled_difficulties:
+                remembered_difficulty = self._get_allowed_difficulty_for_selector(ctx)
+            self.snapshot_difficulty = remembered_difficulty
+
             if char_id in CHARACTER_NAME_BY_SELECT_VALUE and stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
                 self.last_classic_fight_char = char_id
 
         if game_state == STATE_RESULTS and self.prev_game_state != STATE_RESULTS:
             if self.snapshot_stage is not None and self.snapshot_char is not None and self.snapshot_difficulty is not None:
-                slot_data = getattr(ctx, "slot_data", None) or {}
-                max_difficulty_checks = int(slot_data.get("max_difficulty_checks", 4))
+                enabled_difficulties = self._get_enabled_difficulty_values(ctx)
+                enabled_character_values = self.get_enabled_character_values(ctx)
 
-                # Only send Classic fight checks up through the YAML-selected max
-                # difficulty. Example: max_difficulty_checks: normal gives values 0-2.
-                if self.snapshot_difficulty <= max_difficulty_checks:
+                if self.snapshot_char not in enabled_character_values:
+                    self.snapshot_stage = None
+                    self.snapshot_char = None
+                    self.snapshot_difficulty = None
+                    self.prev_game_state = game_state
+                    await self.check_goal(ctx)
+                    return
+
+                # Only send Classic fight checks for the exact YAML-selected
+                # difficulties. Example: difficulty_checks: [hard] sends only
+                # Hard fight locations, not Very Easy/Easy/Normal.
+                if self.snapshot_difficulty in enabled_difficulties:
                     location_id = location_id_by_character_stage_and_difficulty.get((
                         self.snapshot_char,
                         self.snapshot_stage,
@@ -727,6 +1307,30 @@ class Smash64Client(BizHawkClient):
                     ))
                     if location_id is not None:
                         await self._send_location_check_once(ctx, location_id)
+                        # EnergyLink is awarded for clearing fights, not only for
+                        # first-time AP location checks. This keeps repeated clears
+                        # and already-checked locations from silently paying nothing.
+                        await self._deposit_energy_link(ctx, ENERGY_LINK_FIGHT_DEPOSIT)
+                        if CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(self.snapshot_stage) == "Master Hand":
+                            await self._deposit_energy_link(ctx, ENERGY_LINK_CLASSIC_CLEAR_DEPOSIT)
+
+                    # Optional convenience: clearing a fight on a higher selected
+                    # difficulty also sends the same character/fight check on
+                    # lower selected difficulties. This only sends locations that
+                    # actually exist in the current seed via difficulty_checks.
+                    slot_data = getattr(ctx, "slot_data", None) or {}
+                    if bool(slot_data.get("auto_check_lower_difficulties", False)):
+                        for lower_difficulty in sorted(enabled_difficulties):
+                            if lower_difficulty >= self.snapshot_difficulty:
+                                continue
+
+                            lower_location_id = location_id_by_character_stage_and_difficulty.get((
+                                self.snapshot_char,
+                                self.snapshot_stage,
+                                lower_difficulty,
+                            ))
+                            if lower_location_id is not None:
+                                await self._send_location_check_once(ctx, lower_location_id)
 
             self.snapshot_stage = None
             self.snapshot_char = None
@@ -748,7 +1352,7 @@ class Smash64Client(BizHawkClient):
             # When BTT ends/leaves state 0x35, award the character's Break the Targets check.
             # This currently means the bonus stage was reached/finished, not necessarily every target was broken.
             if self.prev_game_state == STATE_BTT and game_state != STATE_BTT:
-                if self.snapshot_btt_char is not None:
+                if self.snapshot_btt_char is not None and self.snapshot_btt_char in self.get_enabled_character_values(ctx):
                     location_id = location_id_by_btt_character_id.get(self.snapshot_btt_char)
                     if location_id is not None:
                         await self._send_location_check_once(ctx, location_id)
@@ -787,10 +1391,14 @@ class Smash64Client(BizHawkClient):
             ])
 
             install_smash64_command_processor(ctx)
+            await self.handle_progressive_difficulty(ctx)
+            # Sync EnergyLink/SharedDamage tags before any clear/damage logic tries
+            # to deposit or bounce packets on this watcher tick.
+            await self.handle_energy_link(ctx)
+            await self.handle_damage_link(ctx)
             await self.handle_classic_stage_checks(ctx)
             await self.handle_health_effect_items(ctx)
             await self.handle_progressive_max_stocks(ctx)
-            await self.handle_progressive_difficulty(ctx)
             await self.handle_death_link(ctx)
             await self.enforce_character_locks(ctx)
         except bizhawk.RequestFailedError:
