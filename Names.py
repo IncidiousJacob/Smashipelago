@@ -136,3 +136,4 @@ CLASSIC_STAGE_NAME_BY_INTERNAL_ID = {
     0x0F: "Race to the Finish",
     0x10: "Final Destination",
 }
+
