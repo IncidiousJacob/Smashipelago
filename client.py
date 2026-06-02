@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Set
+import random
 import time
 import Utils
 
@@ -8,12 +9,20 @@ from NetUtils import ClientStatus
 import worlds._bizhawk as bizhawk
 from worlds._bizhawk.client import BizHawkClient
 
-from .Items import BASE_ID as ITEM_BASE_ID, HEALING_CHEERS_ID, HECKLING_CROWD_ID, PROGRESSIVE_MAX_STOCKS_ID, EXTRA_STOCK_ID, STOCK_THIEF_ID, PROGRESSIVE_DIFFICULTY_ID
-from .Locations import location_id_by_character_stage_and_difficulty, location_id_by_btt_character_id, master_hand_location_ids, master_hand_location_ids_by_difficulty
+from .Items import BASE_ID as ITEM_BASE_ID, HEALING_CHEERS_ID, HECKLING_CROWD_ID, PROGRESSIVE_MAX_STOCKS_ID, EXTRA_STOCK_ID, STOCK_THIEF_ID, PROGRESSIVE_DIFFICULTY_ID, PROGRESSIVE_DAMAGE_OUTPUT_ID
+from .Locations import (
+    location_id_by_character_stage_and_difficulty,
+    randomized_cpu_location_id_by_character_stage_and_difficulty,
+    location_id_by_btt_character_id,
+    master_hand_location_ids,
+    master_hand_location_ids_by_difficulty,
+)
 from .Names import (
     CHARACTERS,
     CHARACTER_INTERNAL_IDS,
     CHARACTER_NAME_BY_INTERNAL_ID,
+    CLASSIC_FIGHTS,
+    CLASSIC_FIGHT_STAGE_IDS,
     CLASSIC_FIGHT_NAME_BY_STAGE_ID,
     CLASSIC_STAGE_NAME_BY_INTERNAL_ID,
     DIFFICULTY_NAME_BY_VALUE,
@@ -34,6 +43,25 @@ UNLOCK_ALL_CHARACTERS_VALUE = bytes([0x0F, 0xF0])
 P1_CHARACTER_SELECT_ADDR = 0x20A8CB
 P1_CLASSIC_CHAR_ADDR = 0x000A4B3B
 
+# Classic CPU character bytes.
+# The first three are the setup/menu bytes the user confirmed decide Classic CPU
+# 1-3 before a fight loads. The slot bytes are also written as a backup once the
+# game creates the in-fight fighter slots.
+CLASSIC_CPU_SETUP_CHARACTER_ADDRS = (0x000A4BAF, 0x000A4C23, 0x000A4C97)
+CLASSIC_CPU_SLOT_CHARACTER_ADDRS = (0x000A4BAC, 0x000A4C20, 0x000A4C94)
+CLASSIC_CPU_CHARACTER_ADDRS = CLASSIC_CPU_SETUP_CHARACTER_ADDRS + CLASSIC_CPU_SLOT_CHARACTER_ADDRS
+CLASSIC_SELECTED_CHARACTER_ADDR = 0x000A4B0A
+CLASSIC_1P_MODE_CHARACTER_ADDR = 0x000A4AE7
+CLASSIC_CPU_RANDOMIZE_BURST_TICKS = 999999
+CLASSIC_CPU_CHARACTER_MIN = 0
+CLASSIC_CPU_CHARACTER_MAX = 11
+CLASSIC_CPU_MENU_VALUE = 0x1C
+SCREEN_CURRENT_ADDR = 0x000A4AD3
+SCREEN_1P_CHARACTER_SELECT = 0x11
+SCREEN_STAGE_INTRO = 0x0E
+SCREEN_WIN = 0x30
+SCREEN_STAGE_CLEAR = 0x33
+
 # Classic/1P tracker addresses from ssb64_1p_tracker.lua.
 GAME_STATE_ADDR = 0x000A4AD0
 CLASSIC_STAGE_ADDR = 0x000A4B19
@@ -41,6 +69,9 @@ CLASSIC_CHAR_ADDR = 0x000A4B3B
 BTT_CHAR_ADDR = BTT_CHARACTER_ADDR
 P1_HEALTH_ADDR = 0x0026805E
 P1_HEALTH_SYSTEM_BUS_ADDR = 0x8026805E
+ENEMY_HEALTH_ADDR = 0x00268BAF
+ENEMY_HEALTH_DISPLAY_ADDR = 0x00131607
+ENEMY_HEALTH_DISPLAY_SOURCE_ADDR = 0x000A4BFB
 P1_STOCKS_ADDR = 0x000A4B43
 MAX_STOCKS_SELECT_ADDR = 0x00138FBB
 DIFFICULTY_SELECT_ADDR = 0x00138FB7
@@ -54,9 +85,19 @@ ENERGY_LINK_HEAL_20_COST = 20
 ENERGY_LINK_HEAL_50_COST = 50
 ENERGY_LINK_STOCK_COST = 50
 
+SMASH_CASH_PER_FIGHT_WIN = 10
+SMASH_CASH_MASTER_HAND_REWARD = 50
+SMASH_CASH_TAG = "SmashCash"
+SMASH_CASH_STOCK_COST = 50
+SMASH_CASH_HEAL_5_COST = 5
+SMASH_CASH_HEAL_10_COST = 10
+SMASH_CASH_HEAL_20_COST = 20
+SMASH_CASH_HEAL_50_COST = 50
+
 DAMAGE_LINK_SEND_COOLDOWN_SECONDS = 10.0
 DAMAGE_LINK_AFTER_CHECK_BLOCK_SECONDS = 30.0
 DAMAGE_LINK_FIGHT_START_GRACE_SECONDS = 3.0
+
 
 
 def _energy_link_key(ctx: "BizHawkClientContext") -> str:
@@ -180,6 +221,89 @@ def cmd_smash64_goal(self) -> None:
             logger.info(f"Need at least one Master Hand clear on {goal_difficulty_name}.")
 
 
+
+def _smash64_cash_handler(ctx: "BizHawkClientContext"):
+    handler = getattr(ctx, "client_handler", None)
+    if handler is None or not hasattr(handler, "spend_smash_cash"):
+        return None
+    return handler
+
+
+def cmd_smash64_cash(self) -> None:
+    """Show Smash Cash balance and spend commands."""
+    from CommonClient import logger
+
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is None:
+        logger.info("Smash64 client is not active yet. Load the patched ROM first.")
+        return
+
+    slot_data = getattr(self.ctx, "slot_data", None) or {}
+    if not bool(slot_data.get("smash_cash", False)):
+        logger.info("Smash Cash is disabled in this seed. Set smash_cash: true in the YAML.")
+        return
+
+    logger.info(f"Smash Cash is {'ON' if handler.smash_cash_enabled else 'OFF'}")
+    logger.info(f"Smash Cash balance: {handler.smash_cash}")
+    logger.info("Earn +10 Smash Cash for each Classic fight win, or +50 for Master Hand.")
+    logger.info("Spend commands: /cash_stock, /cash_heal5, /cash_heal10, /cash_heal20, /cash_heal50")
+    logger.info("Toggle command: /Money")
+
+
+def cmd_smash64_money(self) -> None:
+    """Toggle Smash Cash on/off and sync the SmashCash server tag."""
+    from CommonClient import logger
+
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is None:
+        logger.info("Smash64 client is not active yet. Load the patched ROM first.")
+        return
+
+    slot_data = getattr(self.ctx, "slot_data", None) or {}
+    if not bool(slot_data.get("smash_cash", False)):
+        logger.info("Smash Cash is disabled in this seed. Set smash_cash: true in the YAML.")
+        return
+
+    handler.smash_cash_enabled = not bool(handler.smash_cash_enabled)
+    handler.smash_cash_status_sent = False
+    logger.info(f"Smash Cash {'ON' if handler.smash_cash_enabled else 'OFF'}")
+    logger.info("Server tag will update on the next BizHawk watcher tick.")
+
+
+def cmd_smash64_cash_stock(self) -> None:
+    """Spend 50 Smash Cash to gain one stock in the current/next Classic fight."""
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is not None:
+        handler.spend_smash_cash(self.ctx, "stock", 1, SMASH_CASH_STOCK_COST)
+
+
+def cmd_smash64_cash_heal5(self) -> None:
+    """Spend 5 Smash Cash to heal 5%."""
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is not None:
+        handler.spend_smash_cash(self.ctx, "heal", 5, SMASH_CASH_HEAL_5_COST)
+
+
+def cmd_smash64_cash_heal10(self) -> None:
+    """Spend 10 Smash Cash to heal 10%."""
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is not None:
+        handler.spend_smash_cash(self.ctx, "heal", 10, SMASH_CASH_HEAL_10_COST)
+
+
+def cmd_smash64_cash_heal20(self) -> None:
+    """Spend 20 Smash Cash to heal 20%."""
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is not None:
+        handler.spend_smash_cash(self.ctx, "heal", 20, SMASH_CASH_HEAL_20_COST)
+
+
+def cmd_smash64_cash_heal50(self) -> None:
+    """Spend 50 Smash Cash to heal 50%."""
+    handler = _smash64_cash_handler(self.ctx)
+    if handler is not None:
+        handler.spend_smash_cash(self.ctx, "heal", 50, SMASH_CASH_HEAL_50_COST)
+
 def _smash64_energylink_handler(ctx: "BizHawkClientContext"):
     handler = getattr(ctx, "client_handler", None)
     if handler is None or not hasattr(handler, "queue_energy_link_withdraw"):
@@ -250,6 +374,16 @@ def install_smash64_command_processor(ctx: "BizHawkClientContext") -> None:
     commands["deathlink"] = cmd_smash64_deathlink
     commands["energylink"] = cmd_smash64_energylink
     commands["goal"] = cmd_smash64_goal
+
+    commands["smashcash"] = cmd_smash64_cash
+    commands["cash"] = cmd_smash64_cash
+    commands["Money"] = cmd_smash64_money
+    commands["money"] = cmd_smash64_money
+    commands["cash_stock"] = cmd_smash64_cash_stock
+    commands["cash_heal5"] = cmd_smash64_cash_heal5
+    commands["cash_heal10"] = cmd_smash64_cash_heal10
+    commands["cash_heal20"] = cmd_smash64_cash_heal20
+    commands["cash_heal50"] = cmd_smash64_cash_heal50
     commands["el_heal5"] = cmd_smash64_el_heal5
     commands["el_heal10"] = cmd_smash64_el_heal10
     commands["el_heal20"] = cmd_smash64_el_heal20
@@ -275,6 +409,16 @@ class Smash64Client(BizHawkClient):
     snapshot_difficulty: int | None
     snapshot_btt_char: int | None
     last_classic_fight_char: int | None
+    classic_cpu_randomize_key: tuple[int, int, int] | None
+    classic_cpu_randomize_values: list[int] | None
+    classic_cpu_randomize_ticks: int
+    classic_cpu_player_key: tuple[int, int] | None
+    classic_cpu_next_fight_index: int
+    damage_dealt_limit_key: tuple[int, int, int] | None
+    last_enemy_damage_limit_percent: int | None
+    pending_enemy_damage_target: int | None
+    pending_enemy_damage_delay_ticks: int
+    pending_enemy_damage_force_ticks: int
     processed_received_item_count: int | None
     pending_health_delta: int
     pending_stock_delta: int
@@ -293,6 +437,9 @@ class Smash64Client(BizHawkClient):
     energy_link_notify_sent: bool
     energy_link_value: int
     energy_link_spent_pending_reply: int
+    smash_cash_enabled: bool
+    smash_cash_status_sent: bool
+    smash_cash: int
     pending_energy_link_withdraws: list[tuple[str, int, int]]
     last_stock_value: int | None
     last_max_stock_cap_value: int | None
@@ -319,6 +466,16 @@ class Smash64Client(BizHawkClient):
         self.snapshot_difficulty = None
         self.snapshot_btt_char = None
         self.last_classic_fight_char = None
+        self.classic_cpu_randomize_key = None
+        self.classic_cpu_randomize_values = None
+        self.classic_cpu_randomize_ticks = 0
+        self.classic_cpu_player_key = None
+        self.classic_cpu_next_fight_index = 0
+        self.damage_dealt_limit_key = None
+        self.last_enemy_damage_limit_percent = None
+        self.pending_enemy_damage_target = None
+        self.pending_enemy_damage_delay_ticks = 0
+        self.pending_enemy_damage_force_ticks = 0
         self.processed_received_item_count = None
         self.pending_health_delta = 0
         self.pending_stock_delta = 0
@@ -341,6 +498,9 @@ class Smash64Client(BizHawkClient):
         self.energy_link_value = 0
         self.energy_link_spent_pending_reply = 0
         self.pending_energy_link_withdraws = []
+        self.smash_cash_enabled = True
+        self.smash_cash_status_sent = False
+        self.smash_cash = 0
         self.last_stock_value = None
         self.last_max_stock_cap_value = None
         self.last_difficulty_cap_value = None
@@ -402,6 +562,16 @@ class Smash64Client(BizHawkClient):
         self.snapshot_difficulty = None
         self.snapshot_btt_char = None
         self.last_classic_fight_char = None
+        self.classic_cpu_randomize_key = None
+        self.classic_cpu_randomize_values = None
+        self.classic_cpu_randomize_ticks = 0
+        self.classic_cpu_player_key = None
+        self.classic_cpu_next_fight_index = 0
+        self.damage_dealt_limit_key = None
+        self.last_enemy_damage_limit_percent = None
+        self.pending_enemy_damage_target = None
+        self.pending_enemy_damage_delay_ticks = 0
+        self.pending_enemy_damage_force_ticks = 0
         self.processed_received_item_count = None
         self.pending_health_delta = 0
         self.pending_stock_delta = 0
@@ -424,6 +594,9 @@ class Smash64Client(BizHawkClient):
         self.energy_link_value = 0
         self.energy_link_spent_pending_reply = 0
         self.pending_energy_link_withdraws = []
+        self.smash_cash_enabled = True
+        self.smash_cash_status_sent = False
+        self.smash_cash = 0
         self.last_stock_value = None
         self.last_max_stock_cap_value = None
         self.sent_deathlink_for_current_stockout = False
@@ -662,6 +835,16 @@ class Smash64Client(BizHawkClient):
         """
         return game_state == STATE_IN_BATTLE and stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID
 
+    def _is_classic_cpu_randomizer_state(self, game_state: int, stage_id: int) -> bool:
+        """True while Classic opponent bytes are safe/useful to clamp.
+
+        CPU slot 1 is copied before the fight is active, so this randomizer now
+        writes before the next fight loads instead of waiting for the battle
+        state. During actual battle, leave the bytes alone to avoid fighting the
+        game once the fighter has already spawned.
+        """
+        return game_state != STATE_IN_BATTLE
+
     async def _sync_death_link_status(self, ctx: "BizHawkClientContext") -> None:
         """Keep the room/server DeathLink tag in sync with the slot option.
 
@@ -819,6 +1002,75 @@ class Smash64Client(BizHawkClient):
 
         self.pending_energy_link_withdraws = remaining_withdraws
 
+
+    async def _sync_smash_cash_status(self, ctx: "BizHawkClientContext") -> None:
+        """Keep the room/server SmashCash tag in sync with the slot option and /Money toggle."""
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        slot_enabled = bool(slot_data.get("smash_cash", False))
+        enabled = bool(slot_enabled and self.smash_cash_enabled)
+
+        desired_tags = set(getattr(ctx, "tags", set()) or set())
+        if enabled:
+            desired_tags.add(SMASH_CASH_TAG)
+        else:
+            desired_tags.discard(SMASH_CASH_TAG)
+
+        current_tags = set(getattr(ctx, "tags", set()) or set())
+        if current_tags != desired_tags or not self.smash_cash_status_sent:
+            ctx.tags = desired_tags
+            if getattr(ctx, "server", None) and getattr(ctx.server, "socket", None) and not ctx.server.socket.closed:
+                await ctx.send_msgs([{"cmd": "ConnectUpdate", "tags": list(desired_tags)}])
+            self.smash_cash_status_sent = True
+
+    def award_smash_cash(self, ctx: "BizHawkClientContext", amount: int, reason: str = "") -> None:
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        if not bool(slot_data.get("smash_cash", False)) or not self.smash_cash_enabled:
+            return
+
+        self.smash_cash = max(0, int(self.smash_cash) + int(amount))
+        from CommonClient import logger
+        if reason:
+            logger.info(f"Smash Cash +{amount} ({reason}). Balance: {self.smash_cash}")
+        else:
+            logger.info(f"Smash Cash +{amount}. Balance: {self.smash_cash}")
+
+    def spend_smash_cash(self, ctx: "BizHawkClientContext", effect_type: str, amount: int, cost: int) -> bool:
+        from CommonClient import logger
+
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        if not bool(slot_data.get("smash_cash", False)):
+            logger.info("Smash Cash is disabled in this seed. Set smash_cash: true in the YAML.")
+            return False
+
+        if not self.smash_cash_enabled:
+            logger.info("Smash Cash is OFF. Use /Money to turn it on.")
+            return False
+
+        if self.smash_cash < cost:
+            logger.info(f"Not enough Smash Cash. Need {cost}, have {self.smash_cash}.")
+            return False
+
+        self.smash_cash -= cost
+        if effect_type == "stock":
+            self.pending_stock_delta += int(amount)
+            logger.info(
+                f"Spent {cost} Smash Cash for +{amount} stock. Balance: {self.smash_cash}. "
+                "It will apply during the current/next Classic fight."
+            )
+            return True
+
+        if effect_type == "heal":
+            self.pending_health_delta -= int(amount)
+            logger.info(
+                f"Spent {cost} Smash Cash to heal {amount}% damage. Balance: {self.smash_cash}. "
+                "It will apply during the current/next Classic fight."
+            )
+            return True
+
+        logger.info(f"Unknown Smash Cash effect: {effect_type}")
+        self.smash_cash += cost
+        return False
+
     async def _send_damage_link(self, ctx: "BizHawkClientContext", damage_points: int) -> None:
         if damage_points <= 0:
             return
@@ -838,13 +1090,18 @@ class Smash64Client(BizHawkClient):
 
     async def _send_death_link(self, ctx: "BizHawkClientContext") -> None:
         source = getattr(ctx, "auth", None) or self.player_name or "Super Smash Bros. 64 Player"
+        cause = random.choice([
+            f"{source} Picked a Fight with gravity, and lost!",
+            f"{source} tried button mashing",
+            f"{source} got wombo combo'd",
+        ])
         await ctx.send_msgs([{
             "cmd": "Bounce",
             "tags": ["DeathLink"],
             "data": {
                 "time": time.time(),
                 "source": source,
-                "cause": f"{source} Picked a Fight with gravity, and lost!",
+                "cause": cause,
             },
         }])
 
@@ -1111,6 +1368,411 @@ class Smash64Client(BizHawkClient):
             except bizhawk.RequestFailedError:
                 pass
 
+
+
+    def _is_classic_cpu_randomizer_enabled(self, ctx: "BizHawkClientContext") -> bool:
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        return bool(slot_data.get("randomize_classic_cpu_characters", False))
+
+    def _get_active_classic_location_map(self, ctx: "BizHawkClientContext"):
+        if self._is_classic_cpu_randomizer_enabled(ctx):
+            return randomized_cpu_location_id_by_character_stage_and_difficulty
+        return location_id_by_character_stage_and_difficulty
+
+    def _clamp_classic_cpu_character_value(self, value: int) -> int:
+        value = int(value)
+        if value < CLASSIC_CPU_CHARACTER_MIN:
+            return CLASSIC_CPU_CHARACTER_MIN
+        if value > CLASSIC_CPU_CHARACTER_MAX:
+            return CLASSIC_CPU_CHARACTER_MAX
+        return value
+
+    def _get_classic_cpu_randomizer_values(
+        self,
+        ctx: "BizHawkClientContext",
+        char_id: int,
+        stage_id: int,
+        difficulty_value: int,
+    ) -> list[int] | None:
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        table = slot_data.get("classic_cpu_randomizer_table", {}) or {}
+        raw_values = table.get(f"{int(char_id)}:{int(stage_id)}:{int(difficulty_value)}")
+        if not raw_values:
+            return None
+
+        values: list[int] = []
+        for raw in list(raw_values)[:3]:
+            try:
+                value = self._clamp_classic_cpu_character_value(int(raw))
+            except (TypeError, ValueError):
+                continue
+            if value in CHARACTER_NAME_BY_SELECT_VALUE:
+                values.append(value)
+
+        if not values:
+            return None
+        while len(values) < 3:
+            values.append(values[-1])
+        return values[:3]
+
+    def _get_classic_cpu_randomizer_values_for_fight_index(
+        self,
+        ctx: "BizHawkClientContext",
+        char_id: int,
+        difficulty_value: int,
+        fight_index: int,
+    ) -> list[int] | None:
+        if fight_index < 0 or fight_index >= len(CLASSIC_FIGHTS):
+            return None
+        fight_name = CLASSIC_FIGHTS[fight_index]
+        if fight_name == "Master Hand":
+            return None
+        stage_id = CLASSIC_FIGHT_STAGE_IDS.get(fight_name)
+        if stage_id is None:
+            return None
+        return self._get_classic_cpu_randomizer_values(ctx, char_id, stage_id, difficulty_value)
+
+    async def _write_classic_cpu_characters(self, ctx: "BizHawkClientContext", values: list[int], repeats: int = 1) -> None:
+        clamped_values = [self._clamp_classic_cpu_character_value(value) for value in values[:3]]
+        if not clamped_values:
+            return
+        while len(clamped_values) < 3:
+            clamped_values.append(clamped_values[-1])
+
+        writes = []
+        for addr_group in (CLASSIC_CPU_SETUP_CHARACTER_ADDRS, CLASSIC_CPU_SLOT_CHARACTER_ADDRS):
+            writes.extend(
+                (address, bytes([int(value) & 0xFF]), "RDRAM")
+                for address, value in zip(addr_group, clamped_values[:3])
+            )
+        for _ in range(max(1, int(repeats))):
+            await bizhawk.write(ctx.bizhawk_ctx, writes)
+
+    def _cpu_slots_are_menu_values(self, cpu_values: list[int]) -> bool:
+        """True while the game is still on a menu/null CPU setup value.
+
+        On the 1P character select screen these character bytes become decimal 28
+        (0x1C), which is the game's "in menus / no selected character" sentinel.
+        Writing random playable values over that state can break the randomizer for
+        the next fight, so wait until the game has actually initialized the CPU
+        character slots.
+        """
+        return bool(cpu_values) and int(cpu_values[0]) == CLASSIC_CPU_MENU_VALUE
+
+    async def _prime_classic_cpu_randomizer_for_next_fight(
+        self,
+        ctx: "BizHawkClientContext",
+        char_id: int,
+        difficulty_value: int,
+        fight_index: int,
+        repeats: int = 8,
+    ) -> None:
+        if not self._is_classic_cpu_randomizer_enabled(ctx):
+            return
+        values = self._get_classic_cpu_randomizer_values_for_fight_index(ctx, char_id, difficulty_value, fight_index)
+        if values is None:
+            return
+        self.classic_cpu_next_fight_index = fight_index
+        self.classic_cpu_randomize_key = (int(char_id), int(fight_index), int(difficulty_value))
+        self.classic_cpu_randomize_values = values
+        self.classic_cpu_randomize_ticks = max(self.classic_cpu_randomize_ticks, int(repeats), 1)
+
+    async def _advance_classic_cpu_randomizer_after_fight_win(
+        self,
+        ctx: "BizHawkClientContext",
+        char_id: int,
+        difficulty_value: int,
+        cleared_stage_id: int,
+    ) -> None:
+        fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(cleared_stage_id)
+        if fight_name not in CLASSIC_FIGHTS:
+            return
+        next_fight_index = CLASSIC_FIGHTS.index(fight_name) + 1
+        while next_fight_index < len(CLASSIC_FIGHTS) and CLASSIC_FIGHTS[next_fight_index] == "Master Hand":
+            next_fight_index += 1
+        if next_fight_index >= len(CLASSIC_FIGHTS):
+            self.classic_cpu_randomize_key = None
+            self.classic_cpu_randomize_values = None
+            self.classic_cpu_randomize_ticks = 0
+            return
+        # Pick the next fight's randomized characters now. The handler will keep
+        # holding these values through menus/load until the next fight-win check.
+        await self._prime_classic_cpu_randomizer_for_next_fight(
+            ctx, char_id, difficulty_value, next_fight_index, repeats=CLASSIC_CPU_RANDOMIZE_BURST_TICKS
+        )
+
+    async def handle_classic_cpu_randomizer(self, ctx: "BizHawkClientContext") -> None:
+        if not self._is_classic_cpu_randomizer_enabled(ctx):
+            self.classic_cpu_randomize_key = None
+            self.classic_cpu_randomize_values = None
+            self.classic_cpu_randomize_ticks = 0
+            self.classic_cpu_player_key = None
+            self.classic_cpu_next_fight_index = 0
+            return
+
+        read_values = await bizhawk.read(ctx.bizhawk_ctx, [
+            (GAME_STATE_ADDR, 1, "RDRAM"),
+            (CLASSIC_STAGE_ADDR, 1, "RDRAM"),
+            (CLASSIC_CHAR_ADDR, 1, "RDRAM"),
+            (SCREEN_CURRENT_ADDR, 1, "RDRAM"),
+            (CLASSIC_SELECTED_CHARACTER_ADDR, 1, "RDRAM"),
+            (CLASSIC_1P_MODE_CHARACTER_ADDR, 1, "RDRAM"),
+            *[(address, 1, "RDRAM") for address in CLASSIC_CPU_SETUP_CHARACTER_ADDRS],
+            *[(address, 1, "RDRAM") for address in CLASSIC_CPU_SLOT_CHARACTER_ADDRS],
+        ])
+        game_state = read_values[0][0]
+        stage_id = read_values[1][0]
+        char_id = read_values[2][0]
+        screen_id = read_values[3][0]
+        selected_char_id = read_values[4][0]
+        one_p_mode_char_id = read_values[5][0]
+        cpu_values = [entry[0] for entry in read_values[6:]]
+
+        # On the 1P character-select screen the in-fight P1 byte is not always
+        # ready yet, so use the selected/1P-mode bytes to choose the table row.
+        if screen_id == SCREEN_1P_CHARACTER_SELECT:
+            if selected_char_id in CHARACTER_NAME_BY_SELECT_VALUE:
+                char_id = selected_char_id
+            elif one_p_mode_char_id in CHARACTER_NAME_BY_SELECT_VALUE:
+                char_id = one_p_mode_char_id
+
+        difficulty_value = self.last_selected_difficulty_value
+        enabled_difficulties = self._get_enabled_difficulty_values(ctx)
+        if difficulty_value not in enabled_difficulties:
+            difficulty_value = self._get_allowed_difficulty_for_selector(ctx)
+        if difficulty_value not in enabled_difficulties or char_id not in CHARACTER_NAME_BY_SELECT_VALUE:
+            self.classic_cpu_randomize_key = None
+            self.classic_cpu_randomize_values = None
+            self.classic_cpu_randomize_ticks = 0
+            return
+
+        player_key = (int(char_id), int(difficulty_value))
+        if self.classic_cpu_player_key != player_key:
+            # New Classic run/character/difficulty: choose fight 1 immediately
+            # and hold those CPU values from the character-select screen onward.
+            self.classic_cpu_player_key = player_key
+            self.classic_cpu_next_fight_index = 0
+            await self._prime_classic_cpu_randomizer_for_next_fight(
+                ctx, char_id, difficulty_value, 0, repeats=CLASSIC_CPU_RANDOMIZE_BURST_TICKS
+            )
+
+        if game_state == STATE_IN_BATTLE and stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
+            fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(stage_id)
+            if fight_name in CLASSIC_FIGHTS:
+                self.classic_cpu_next_fight_index = min(CLASSIC_FIGHTS.index(fight_name) + 1, len(CLASSIC_FIGHTS) - 1)
+            # Keep a short burst alive at the start of the battle in case the
+            # stage intro transitions quickly, but never write over menu/null bytes.
+        elif stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
+            fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(stage_id)
+            if fight_name in CLASSIC_FIGHTS and fight_name != "Master Hand":
+                fight_index = CLASSIC_FIGHTS.index(fight_name)
+                key = (int(char_id), int(fight_index), int(difficulty_value))
+                if self.classic_cpu_randomize_key != key or self.classic_cpu_randomize_values is None:
+                    await self._prime_classic_cpu_randomizer_for_next_fight(
+                        ctx, char_id, difficulty_value, fight_index, repeats=CLASSIC_CPU_RANDOMIZE_BURST_TICKS
+                    )
+
+        # The CPU bytes are 0x1C/28 on the 1P character-select screen. That is
+        # exactly the earliest useful window for changing the next Classic fight,
+        # so write and hold the randomized values there instead of skipping it.
+        # Keep enforcing the current randomized set until a fight-win check sends;
+        # _advance_classic_cpu_randomizer_after_fight_win() is the only normal path
+        # that chooses the next fight's randomized values.
+        if self.classic_cpu_randomize_ticks <= 0 or not self.classic_cpu_randomize_values:
+            return
+
+        if (
+            screen_id in {SCREEN_1P_CHARACTER_SELECT, SCREEN_STAGE_INTRO, SCREEN_WIN, SCREEN_STAGE_CLEAR}
+            or game_state != STATE_IN_BATTLE
+            or stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID
+            or self._cpu_slots_are_menu_values(cpu_values)
+        ):
+            await self._write_classic_cpu_characters(ctx, self.classic_cpu_randomize_values, repeats=1)
+
+    async def _write_enemy_percent_damage(self, ctx: "BizHawkClientContext", value: int, repeats: int = 8) -> None:
+        """Write the current enemy calculated-damage byte.
+
+        0x268BAF is the confirmed source value future enemy damage is calculated
+        from. The two other observed bytes are also written so the visible/mirrored
+        percent has a better chance to stay in sync with the capped value.
+        """
+        value_byte = bytes([value & 0xFF])
+        for _ in range(repeats):
+            await bizhawk.write(ctx.bizhawk_ctx, [
+                (ENEMY_HEALTH_ADDR, value_byte, "RDRAM"),
+                (ENEMY_HEALTH_DISPLAY_ADDR, value_byte, "RDRAM"),
+                (ENEMY_HEALTH_DISPLAY_SOURCE_ADDR, value_byte, "RDRAM"),
+            ])
+
+    def _progressive_damage_dealt_enabled(self, ctx: "BizHawkClientContext") -> bool:
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        return bool(slot_data.get("progressive_damage_dealt", True))
+
+    def _get_damage_dealt_multiplier(self, ctx: "BizHawkClientContext") -> int:
+        """Return the current progressive damage-output multiplier.
+
+        The seed starts the player at 20% normal damage. Each received
+        Progressive Damage Output item adds 20%, capped at 200% after 9 items.
+        """
+        if not self._progressive_damage_dealt_enabled(ctx):
+            return 100
+
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        try:
+            base = int(slot_data.get("starting_damage_dealt_multiplier", 20) or 20)
+        except (TypeError, ValueError):
+            base = 20
+        try:
+            step = int(slot_data.get("progressive_damage_output_step", 20) or 20)
+        except (TypeError, ValueError):
+            step = 20
+        try:
+            max_multiplier = int(slot_data.get("max_damage_dealt_multiplier", 200) or 200)
+        except (TypeError, ValueError):
+            max_multiplier = 200
+
+        progressive_count = 0
+        for network_item in getattr(ctx, "items_received", []):
+            if int(network_item.item) == PROGRESSIVE_DAMAGE_OUTPUT_ID:
+                progressive_count += 1
+
+        multiplier = base + (progressive_count * step)
+        return max(0, min(max_multiplier, multiplier))
+
+    def _get_damage_dealt_update_delay(self, ctx: "BizHawkClientContext") -> int:
+        slot_data = getattr(ctx, "slot_data", None) or {}
+        try:
+            delay = int(slot_data.get("damage_dealt_update_delay", 2) or 0)
+        except (TypeError, ValueError):
+            delay = 2
+        return max(0, min(30, delay))
+
+    async def handle_damage_dealt_multiplier(self, ctx: "BizHawkClientContext") -> None:
+        """Scale damage dealt to Classic enemies after the game calculates a hit.
+
+        The client watches the enemy calculated-damage source byte. When it jumps
+        upward, the raw difference is multiplied by the current progressive damage
+        output percentage, then written back after damage_dealt_update_delay watcher
+        ticks. This makes future damage calculate from the limited/scaled value.
+        """
+        if not self._progressive_damage_dealt_enabled(ctx):
+            self.damage_dealt_limit_key = None
+            self.last_enemy_damage_limit_percent = None
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        multiplier = self._get_damage_dealt_multiplier(ctx)
+
+        game_state, stage_id, char_id, current_enemy_damage = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+            (GAME_STATE_ADDR, 1, "RDRAM"),
+            (CLASSIC_STAGE_ADDR, 1, "RDRAM"),
+            (CLASSIC_CHAR_ADDR, 1, "RDRAM"),
+            (ENEMY_HEALTH_ADDR, 1, "RDRAM"),
+        ])]
+
+        if not self._is_classic_fight_state(game_state, stage_id):
+            self.damage_dealt_limit_key = None
+            self.last_enemy_damage_limit_percent = None
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        enabled_character_values = self.get_enabled_character_values(ctx)
+        if char_id not in enabled_character_values:
+            self.damage_dealt_limit_key = None
+            self.last_enemy_damage_limit_percent = None
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        enabled_difficulties = self._get_enabled_difficulty_values(ctx)
+        difficulty_value = self.last_selected_difficulty_value
+        if difficulty_value not in enabled_difficulties:
+            difficulty_value = self._get_allowed_difficulty_for_selector(ctx)
+        if difficulty_value not in enabled_difficulties:
+            self.damage_dealt_limit_key = None
+            self.last_enemy_damage_limit_percent = None
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        fight_key = (int(char_id), int(stage_id), int(difficulty_value))
+        current_enemy_damage = max(0, min(255, int(current_enemy_damage)))
+
+        if self.damage_dealt_limit_key != fight_key:
+            self.damage_dealt_limit_key = fight_key
+            self.last_enemy_damage_limit_percent = current_enemy_damage
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        # Finish any delayed write before looking for the next hit.
+        #
+        # Important: do not keep forcing the old target for multiple watcher
+        # ticks. If the CPU is hit again while the previous write is still
+        # pending/being applied, repeatedly writing the previous target can
+        # erase the new hit and make enemy damage look like it resets every
+        # hit. Treat the pending target as the current limited source value,
+        # then scale any extra damage from there.
+        if self.pending_enemy_damage_target is not None:
+            pending_target = max(0, min(255, int(self.pending_enemy_damage_target)))
+
+            if self.pending_enemy_damage_delay_ticks > 0:
+                self.pending_enemy_damage_delay_ticks -= 1
+                return
+
+            if current_enemy_damage > pending_target:
+                previous_damage = pending_target
+                raw_delta = current_enemy_damage - previous_damage
+                adjusted_delta = int(round(raw_delta * multiplier / 100.0))
+                if multiplier > 0 and raw_delta > 0 and adjusted_delta <= 0:
+                    adjusted_delta = 1
+                adjusted_target = max(0, min(255, previous_damage + adjusted_delta))
+
+                self.pending_enemy_damage_target = adjusted_target
+                self.pending_enemy_damage_delay_ticks = self._get_damage_dealt_update_delay(ctx)
+                self.last_enemy_damage_limit_percent = previous_damage
+                return
+
+            await self._write_enemy_percent_damage(ctx, pending_target, repeats=3)
+            self.last_enemy_damage_limit_percent = pending_target
+            self.pending_enemy_damage_target = None
+            self.pending_enemy_damage_delay_ticks = 0
+            self.pending_enemy_damage_force_ticks = 0
+            return
+
+        previous_damage = self.last_enemy_damage_limit_percent
+        if previous_damage is None:
+            self.last_enemy_damage_limit_percent = current_enemy_damage
+            return
+
+        if current_enemy_damage < previous_damage:
+            # New stock/opponent or memory reset. Do not treat it as dealt damage.
+            self.last_enemy_damage_limit_percent = current_enemy_damage
+            return
+
+        if current_enemy_damage == previous_damage:
+            return
+
+        raw_delta = current_enemy_damage - previous_damage
+        adjusted_delta = int(round(raw_delta * multiplier / 100.0))
+        if multiplier > 0 and raw_delta > 0 and adjusted_delta <= 0:
+            adjusted_delta = 1
+        adjusted_target = max(0, min(255, previous_damage + adjusted_delta))
+
+        if adjusted_target < current_enemy_damage:
+            self.pending_enemy_damage_target = adjusted_target
+            self.pending_enemy_damage_delay_ticks = self._get_damage_dealt_update_delay(ctx)
+            self.pending_enemy_damage_force_ticks = 0
+        else:
+            self.last_enemy_damage_limit_percent = current_enemy_damage
+
     async def handle_damage_link(self, ctx: "BizHawkClientContext") -> None:
         await self._sync_damage_link_status(ctx)
         if not self.damage_link_enabled:
@@ -1300,13 +1962,17 @@ class Smash64Client(BizHawkClient):
                 # difficulties. Example: difficulty_checks: [hard] sends only
                 # Hard fight locations, not Very Easy/Easy/Normal.
                 if self.snapshot_difficulty in enabled_difficulties:
-                    location_id = location_id_by_character_stage_and_difficulty.get((
+                    active_location_map = self._get_active_classic_location_map(ctx)
+                    location_id = active_location_map.get((
                         self.snapshot_char,
                         self.snapshot_stage,
                         self.snapshot_difficulty,
                     ))
                     if location_id is not None:
                         await self._send_location_check_once(ctx, location_id)
+                        await self._advance_classic_cpu_randomizer_after_fight_win(
+                            ctx, self.snapshot_char, self.snapshot_difficulty, self.snapshot_stage
+                        )
                         # EnergyLink is awarded for clearing fights, not only for
                         # first-time AP location checks. This keeps repeated clears
                         # and already-checked locations from silently paying nothing.
@@ -1324,13 +1990,20 @@ class Smash64Client(BizHawkClient):
                             if lower_difficulty >= self.snapshot_difficulty:
                                 continue
 
-                            lower_location_id = location_id_by_character_stage_and_difficulty.get((
+                            active_location_map = self._get_active_classic_location_map(ctx)
+                            lower_location_id = active_location_map.get((
                                 self.snapshot_char,
                                 self.snapshot_stage,
                                 lower_difficulty,
                             ))
                             if lower_location_id is not None:
                                 await self._send_location_check_once(ctx, lower_location_id)
+
+
+                    if self.snapshot_stage in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
+                        fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(self.snapshot_stage, "Classic fight")
+                        reward = SMASH_CASH_MASTER_HAND_REWARD if fight_name == "Master Hand" else SMASH_CASH_PER_FIGHT_WIN
+                        self.award_smash_cash(ctx, reward, f"{fight_name} win")
 
             self.snapshot_stage = None
             self.snapshot_char = None
@@ -1395,7 +2068,10 @@ class Smash64Client(BizHawkClient):
             # Sync EnergyLink/SharedDamage tags before any clear/damage logic tries
             # to deposit or bounce packets on this watcher tick.
             await self.handle_energy_link(ctx)
+            await self._sync_smash_cash_status(ctx)
             await self.handle_damage_link(ctx)
+            await self.handle_classic_cpu_randomizer(ctx)
+            await self.handle_damage_dealt_multiplier(ctx)
             await self.handle_classic_stage_checks(ctx)
             await self.handle_health_effect_items(ctx)
             await self.handle_progressive_max_stocks(ctx)

@@ -11,6 +11,7 @@ EXTRA_STOCK_ID = BASE_ID + len(CHARACTERS) + 5
 STOCK_THIEF_ID = BASE_ID + len(CHARACTERS) + 6
 PROGRESSIVE_DIFFICULTY_ID = BASE_ID + len(CHARACTERS) + 7
 GOAL_DIFFICULTY_CLEAR_ID = BASE_ID + len(CHARACTERS) + 8
+PROGRESSIVE_DAMAGE_OUTPUT_ID = BASE_ID + len(CHARACTERS) + 9
 
 class Smash64Item(Item):
     game = "Super Smash Bros. 64"
@@ -66,6 +67,11 @@ item_table["Progressive Difficulty"] = {
 
 item_table["Goal Difficulty Clear"] = {
     "code": GOAL_DIFFICULTY_CLEAR_ID,
+    "classification": ItemClassification.progression,
+}
+
+item_table["Progressive Damage Output"] = {
+    "code": PROGRESSIVE_DAMAGE_OUTPUT_ID,
     "classification": ItemClassification.progression,
 }
 

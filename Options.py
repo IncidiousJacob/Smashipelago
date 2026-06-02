@@ -125,6 +125,33 @@ class DeathLink(Toggle):
     default = 0
 
 
+
+
+
+
+class RandomizeClassicCpuCharacters(Toggle):
+    """When enabled, the client randomizes Classic Mode CPU character bytes for each fight. Classic fight location names become generic Fight 1 Win, Fight 2 Win, etc. instead of naming the vanilla opponent."""
+    display_name = "Randomize Classic CPU Characters"
+    default = 0
+
+class ProgressiveDamageDealt(Toggle):
+    """When enabled, player damage dealt to Classic enemies starts at 20% and is raised by Progressive Damage Output items. When disabled, enemies take normal damage and no Progressive Damage Output items are added to the pool."""
+    display_name = "Progressive Damage Dealt"
+    default = 1
+
+
+class DamageDealtUpdateDelay(Range):
+    """Client watcher ticks to wait before writing the scaled enemy damage value.
+
+    A small delay lets Smash calculate the hit first, then the client replaces the
+    enemy calculated-damage source value with the scaled result. 2 is usually safest.
+    """
+    display_name = "Damage Dealt Update Delay"
+    range_start = 0
+    range_end = 30
+    default = 2
+
+
 class HecklingCrowdCount(Range):
     """Number of Heckling Crowd trap items in the pool."""
     display_name = "Heckling Crowd Count"
@@ -138,6 +165,12 @@ class StockThiefCount(Range):
     range_start = 1
     range_end = 20
     default = 5
+
+
+class SmashCash(Toggle):
+    """When enabled, clearing Classic fights earns local Smash Cash. Use /cash commands in the BizHawk client to spend it on healing or an extra stock."""
+    display_name = "Smash Cash"
+    default = 0
 
 
 class EnergyLink(Toggle):
@@ -161,8 +194,12 @@ class Smash64Options(PerGameCommonOptions):
     difficulty_checks: DifficultyChecks
     auto_check_lower_difficulties: AutoCheckLowerDifficulties
     goal_difficulty: GoalDifficulty
+    randomize_classic_cpu_characters: RandomizeClassicCpuCharacters
+    progressive_damage_dealt: ProgressiveDamageDealt
+    damage_dealt_update_delay: DamageDealtUpdateDelay
     heckling_crowd_count: HecklingCrowdCount
     stock_thief_count: StockThiefCount
     death_link: DeathLink
+    smash_cash: SmashCash
     damage_link: DamageLink
     energy_link: EnergyLink

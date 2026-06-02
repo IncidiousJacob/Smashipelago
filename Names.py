@@ -56,10 +56,19 @@ CLASSIC_FIGHTS = [
     "Master Hand",
 ]
 
+CLASSIC_FIGHT_NUMBER_BY_NAME = {
+    fight: index + 1 for index, fight in enumerate(CLASSIC_FIGHTS)
+}
+
+CLASSIC_FIGHT_GENERIC_NAME_BY_NAME = {
+    fight: f"Fight {index + 1} Win" for index, fight in enumerate(CLASSIC_FIGHTS)
+}
+
 # Bonus/checks backed by separate RAM handling.
 BONUS_FIGHTS = [
     "Break the Targets",
 ]
+
 
 # Values found by ssb64_1p_tracker.lua, remapped from arena -> fight.
 # The actual Yoshi Team fight reports stage id 0x0C: Yoshi's Island (no clouds).
@@ -79,6 +88,11 @@ CLASSIC_FIGHT_STAGE_IDS = {
 
 CLASSIC_FIGHT_NAME_BY_STAGE_ID = {
     value: name for name, value in CLASSIC_FIGHT_STAGE_IDS.items()
+}
+
+CLASSIC_FIGHT_NUMBER_BY_STAGE_ID = {
+    stage_id: CLASSIC_FIGHT_NUMBER_BY_NAME[fight]
+    for fight, stage_id in CLASSIC_FIGHT_STAGE_IDS.items()
 }
 
 # Break the Targets uses a separate character byte during the bonus stage.

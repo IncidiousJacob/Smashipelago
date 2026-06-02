@@ -37,8 +37,22 @@ difficulty_checks:
   - very_hard
 auto_check_lower_difficulties: false
 goal_difficulty: very_easy
+# Randomize Classic Mode CPU character bytes for each fight.
+# When true, Classic fight location names become generic:
+# "Fight 1 Win", "Fight 2 Win", etc. instead of naming the vanilla opponent.
+randomize_classic_cpu_characters: false
+# Enable Progressive Damage Output items and the damage-dealt limiter.
+# When false, enemies take normal damage and no Progressive Damage Output items are placed.
+progressive_damage_dealt: true
+# Damage dealt to Classic enemies starts at 20% of normal.
+# Each Progressive Damage Output item adds another 20%, up to 200% of normal.
+# Client watcher ticks to wait before forcing the scaled enemy damage value.
+# 2 is the default because it gives the game time to finish calculating the hit first.
+damage_dealt_update_delay: 2
 heckling_crowd_count: 5
 stock_thief_count: 5
+# Enable local Smash Cash. Earn cash from Classic fight wins, then spend it with /cash commands.
+smash_cash: false
 death_link: false
 damage_link: false
 energy_link: false

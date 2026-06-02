@@ -5,6 +5,7 @@ from .Names import (
     BONUS_FIGHTS,
     CHARACTER_INTERNAL_IDS,
     CLASSIC_FIGHT_STAGE_IDS,
+    CLASSIC_FIGHT_GENERIC_NAME_BY_NAME,
     DIFFICULTIES,
     DIFFICULTY_VALUE_BY_NAME,
 )
@@ -21,17 +22,37 @@ for character in CHARACTERS:
     for difficulty in DIFFICULTIES:
         difficulty_value = DIFFICULTY_VALUE_BY_NAME[difficulty]
         for fight in CLASSIC_FIGHTS:
-            location_table[f"{character}: {difficulty} Defeat {fight}"] = {
+            stage_id = CLASSIC_FIGHT_STAGE_IDS[fight]
+            normal_location_name = f"{character}: {difficulty} Defeat {fight}"
+            generic_location_name = f"{character}: {difficulty} {CLASSIC_FIGHT_GENERIC_NAME_BY_NAME[fight]}"
+            location_table[normal_location_name] = {
                 "code": _next_id,
+                "normal_name": normal_location_name,
+                "generic_name": generic_location_name,
                 "character": character,
                 "character_id": CHARACTER_INTERNAL_IDS[character],
                 "difficulty": difficulty,
                 "difficulty_value": difficulty_value,
                 "fight": fight,
-                "stage_id": CLASSIC_FIGHT_STAGE_IDS[fight],
+                "stage_id": stage_id,
                 "type": "classic_fight",
             }
             _next_id += 1
+
+            location_table[generic_location_name] = {
+                "code": _next_id,
+                "normal_name": normal_location_name,
+                "generic_name": generic_location_name,
+                "character": character,
+                "character_id": CHARACTER_INTERNAL_IDS[character],
+                "difficulty": difficulty,
+                "difficulty_value": difficulty_value,
+                "fight": fight,
+                "stage_id": stage_id,
+                "type": "classic_fight_randomized_cpu",
+            }
+            _next_id += 1
+
 
     for fight in BONUS_FIGHTS:
         location_table[f"{character}: {fight}"] = {
@@ -52,6 +73,12 @@ location_id_by_character_stage_and_difficulty = {
     if data["type"] == "classic_fight"
 }
 
+randomized_cpu_location_id_by_character_stage_and_difficulty = {
+    (data["character_id"], data["stage_id"], data["difficulty_value"]): data["code"]
+    for data in location_table.values()
+    if data["type"] == "classic_fight_randomized_cpu"
+}
+
 # Compatibility alias for older imports. Very Easy only.
 location_id_by_character_and_stage_id = {
     (data["character_id"], data["stage_id"]): data["code"]
@@ -69,7 +96,7 @@ location_id_by_btt_character_id = {
 master_hand_location_ids = {
     data["code"]
     for data in location_table.values()
-    if data["type"] == "classic_fight" and data["fight"] == "Master Hand"
+    if data["type"] in {"classic_fight", "classic_fight_randomized_cpu"} and data["fight"] == "Master Hand"
 }
 
 
@@ -77,7 +104,7 @@ master_hand_location_ids_by_difficulty = {
     difficulty_value: {
         data["code"]
         for data in location_table.values()
-        if data["type"] == "classic_fight"
+        if data["type"] in {"classic_fight", "classic_fight_randomized_cpu"}
         and data["fight"] == "Master Hand"
         and data["difficulty_value"] == difficulty_value
     }
