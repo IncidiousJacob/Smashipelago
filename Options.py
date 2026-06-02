@@ -153,16 +153,16 @@ class DamageDealtUpdateDelay(Range):
 
 
 class HecklingCrowdCount(Range):
-    """Number of Heckling Crowd trap items in the pool."""
+    """Number of Heckling Crowd trap items in the pool. Set to 0 to remove this trap from the item pool."""
     display_name = "Heckling Crowd Count"
-    range_start = 1
+    range_start = 0
     range_end = 20
     default = 5
 
 class StockThiefCount(Range):
-    """Number of Stock Thief trap items in the pool."""
+    """Number of Stock Thief trap items in the pool. Set to 0 to remove this trap from the item pool."""
     display_name = "Stock Thief Count"
-    range_start = 1
+    range_start = 0
     range_end = 20
     default = 5
 
