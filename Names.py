@@ -67,6 +67,8 @@ CLASSIC_FIGHT_GENERIC_NAME_BY_NAME = {
 # Bonus/checks backed by separate RAM handling.
 BONUS_FIGHTS = [
     "Break the Targets",
+    "Board the Platforms",
+    "Race to the Finish",
 ]
 
 
@@ -102,6 +104,17 @@ CLASSIC_FIGHT_NUMBER_BY_STAGE_ID = {
 #   0x0A4B09 = 0x04 for Luigi BTT
 BTT_CHARACTER_ADDR = 0x000A4B09
 BTT_STATE_ID = 0x35
+
+# Bonus-stage helpers from RAM notes. Board the Platforms and Race to the
+# Finish both use the bonus-stage screen/state range, but completion is detected
+# with their specific stage/objective/status bytes.
+BTT_STAGE_ID = 0x09
+BTP_STAGE_ID = 0x0A
+RTTF_STAGE_ID = 0x0F
+BTP_PLATFORMS_REMAINING_ADDR = 0x00131403
+RTTF_STATUS_ADDR_1 = 0x0026923C
+RTTF_STATUS_ADDR_2 = 0x002B8C8C
+RTTF_CLEAR_STATUS = 0x40
 
 # Optional human-readable arena labels for client logs/debug only.
 CLASSIC_STAGE_NAME_BY_INTERNAL_ID = {

@@ -55,12 +55,21 @@ for character in CHARACTERS:
 
 
     for fight in BONUS_FIGHTS:
+        if fight == "Break the Targets":
+            bonus_type = "bonus_btt"
+        elif fight == "Board the Platforms":
+            bonus_type = "bonus_btp"
+        elif fight == "Race to the Finish":
+            bonus_type = "bonus_rttf"
+        else:
+            bonus_type = "bonus"
+
         location_table[f"{character}: {fight}"] = {
             "code": _next_id,
             "character": character,
             "character_id": CHARACTER_INTERNAL_IDS[character],
             "fight": fight,
-            "type": "bonus_btt",
+            "type": bonus_type,
         }
         _next_id += 1
 
@@ -86,11 +95,23 @@ location_id_by_character_and_stage_id = {
     if data["type"] == "classic_fight" and data["difficulty_value"] == 0
 }
 
-# Runtime lookup: BTT character byte -> AP location.
+# Runtime lookup: bonus-stage character byte -> AP location.
 location_id_by_btt_character_id = {
     data["character_id"]: data["code"]
     for data in location_table.values()
     if data["type"] == "bonus_btt"
+}
+
+location_id_by_btp_character_id = {
+    data["character_id"]: data["code"]
+    for data in location_table.values()
+    if data["type"] == "bonus_btp"
+}
+
+location_id_by_rttf_character_id = {
+    data["character_id"]: data["code"]
+    for data in location_table.values()
+    if data["type"] == "bonus_rttf"
 }
 
 master_hand_location_ids = {

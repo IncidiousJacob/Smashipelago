@@ -52,7 +52,7 @@ class RequiredClassicCompletions(Range):
     default = 8
 
 class IncludeBonusStages(Toggle):
-    """Whether Break the Targets checks are included."""
+    """Whether Break the Targets, Board the Platforms, and Race to the Finish checks are included."""
     display_name = "Include Bonus Stages"
     default = 1
 

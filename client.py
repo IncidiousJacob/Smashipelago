@@ -14,6 +14,8 @@ from .Locations import (
     location_id_by_character_stage_and_difficulty,
     randomized_cpu_location_id_by_character_stage_and_difficulty,
     location_id_by_btt_character_id,
+    location_id_by_btp_character_id,
+    location_id_by_rttf_character_id,
     master_hand_location_ids,
     master_hand_location_ids_by_difficulty,
 )
@@ -28,6 +30,13 @@ from .Names import (
     DIFFICULTY_NAME_BY_VALUE,
     BTT_CHARACTER_ADDR,
     BTT_STATE_ID,
+    BTT_STAGE_ID,
+    BTP_STAGE_ID,
+    RTTF_STAGE_ID,
+    BTP_PLATFORMS_REMAINING_ADDR,
+    RTTF_STATUS_ADDR_1,
+    RTTF_STATUS_ADDR_2,
+    RTTF_CLEAR_STATUS,
 )
 from .rom import SMASH64_AP_MARKER, SMASH64_AP_MARKER_OFFSET, SMASH64_PLAYER_NAME_OFFSET, SMASH64_PLAYER_NAME_LENGTH
 
@@ -52,12 +61,15 @@ CLASSIC_CPU_SLOT_CHARACTER_ADDRS = (0x000A4BAC, 0x000A4C20, 0x000A4C94)
 CLASSIC_CPU_CHARACTER_ADDRS = CLASSIC_CPU_SETUP_CHARACTER_ADDRS + CLASSIC_CPU_SLOT_CHARACTER_ADDRS
 CLASSIC_SELECTED_CHARACTER_ADDR = 0x000A4B0A
 CLASSIC_1P_MODE_CHARACTER_ADDR = 0x000A4AE7
+P1_FIGHTER_CHARACTER_ADDR = 0x000A4B38
 CLASSIC_CPU_RANDOMIZE_BURST_TICKS = 999999
 CLASSIC_CPU_CHARACTER_MIN = 0
 CLASSIC_CPU_CHARACTER_MAX = 11
 CLASSIC_CPU_MENU_VALUE = 0x1C
 SCREEN_CURRENT_ADDR = 0x000A4AD3
 SCREEN_1P_CHARACTER_SELECT = 0x11
+SCREEN_BTT_CHARACTER_SELECT = 0x13
+SCREEN_BTP_CHARACTER_SELECT = 0x14
 SCREEN_STAGE_INTRO = 0x0E
 SCREEN_WIN = 0x30
 SCREEN_STAGE_CLEAR = 0x33
@@ -65,8 +77,20 @@ SCREEN_STAGE_CLEAR = 0x33
 # Classic/1P tracker addresses from ssb64_1p_tracker.lua.
 GAME_STATE_ADDR = 0x000A4AD0
 CLASSIC_STAGE_ADDR = 0x000A4B19
+CURRENT_STAGE_ADDR = 0x000A4AE4
+STAGE_ID_ALT_ADDR = 0x000A4D0A
 CLASSIC_CHAR_ADDR = 0x000A4B3B
 BTT_CHAR_ADDR = BTT_CHARACTER_ADDR
+BONUS_CHARACTER_CANDIDATE_ADDRS = (
+    CLASSIC_1P_MODE_CHARACTER_ADDR,
+    CLASSIC_SELECTED_CHARACTER_ADDR,
+    P1_FIGHTER_CHARACTER_ADDR,
+    CLASSIC_CHAR_ADDR,
+    BTT_CHAR_ADDR,
+)
+BTP_PLATFORMS_LEFT_ADDR = BTP_PLATFORMS_REMAINING_ADDR
+RTTF_STATUS_1_ADDR = RTTF_STATUS_ADDR_1
+RTTF_STATUS_2_ADDR = RTTF_STATUS_ADDR_2
 P1_HEALTH_ADDR = 0x0026805E
 P1_HEALTH_SYSTEM_BUS_ADDR = 0x8026805E
 ENEMY_HEALTH_ADDR = 0x00268BAF
@@ -408,7 +432,15 @@ class Smash64Client(BizHawkClient):
     snapshot_char: int | None
     snapshot_difficulty: int | None
     snapshot_btt_char: int | None
+    snapshot_btp_char: int | None
+    snapshot_rttf_char: int | None
+    latched_btt_select_char: int | None
+    latched_btp_select_char: int | None
+    snapshot_btp_platforms_started: bool
+    bonus_stage_kind: str | None
+    snapshot_rttf_started: bool
     last_classic_fight_char: int | None
+    last_bonus_character: int | None
     classic_cpu_randomize_key: tuple[int, int, int] | None
     classic_cpu_randomize_values: list[int] | None
     classic_cpu_randomize_ticks: int
@@ -465,7 +497,15 @@ class Smash64Client(BizHawkClient):
         self.snapshot_char = None
         self.snapshot_difficulty = None
         self.snapshot_btt_char = None
+        self.snapshot_btp_char = None
+        self.snapshot_rttf_char = None
+        self.latched_btt_select_char = None
+        self.latched_btp_select_char = None
+        self.snapshot_btp_platforms_started = False
+        self.bonus_stage_kind = None
+        self.snapshot_rttf_started = False
         self.last_classic_fight_char = None
+        self.last_bonus_character = None
         self.classic_cpu_randomize_key = None
         self.classic_cpu_randomize_values = None
         self.classic_cpu_randomize_ticks = 0
@@ -561,7 +601,15 @@ class Smash64Client(BizHawkClient):
         self.snapshot_char = None
         self.snapshot_difficulty = None
         self.snapshot_btt_char = None
+        self.snapshot_btp_char = None
+        self.snapshot_rttf_char = None
+        self.latched_btt_select_char = None
+        self.latched_btp_select_char = None
+        self.snapshot_btp_platforms_started = False
+        self.bonus_stage_kind = None
+        self.snapshot_rttf_started = False
         self.last_classic_fight_char = None
+        self.last_bonus_character = None
         self.classic_cpu_randomize_key = None
         self.classic_cpu_randomize_values = None
         self.classic_cpu_randomize_ticks = 0
@@ -1913,19 +1961,206 @@ class Smash64Client(BizHawkClient):
                         await self._burst_write_u8(ctx, P1_STOCKS_ADDR, new_stocks, repeats=12)
                     self.pending_stock_delta += 1
 
+    def _is_enabled_character_value(self, ctx: "BizHawkClientContext", value: int | None) -> bool:
+        return value in CHARACTER_NAME_BY_SELECT_VALUE and value in self.get_enabled_character_values(ctx)
+
+    def _first_enabled_character_value(self, ctx: "BizHawkClientContext", *values: int | None) -> int | None:
+        """Return the first valid enabled character from explicitly ordered candidates.
+
+        Bonus-stage character bytes can be stale, so BTT/BTP/RTTF call this with
+        stage-specific priority instead of sharing one generic fallback order.
+        This intentionally does not fall back by itself; callers decide whether
+        a stale remembered character is safer than waiting for a fresh stage byte.
+        """
+        for value in values:
+            if self._is_enabled_character_value(ctx, value):
+                self.last_bonus_character = int(value)
+                return int(value)
+        return None
+
+    def _first_enabled_character_value_no_memory(self, ctx: "BizHawkClientContext", *values: int | None) -> int | None:
+        """Return a valid character without falling back to or updating stale memory.
+
+        BTP/RTTF were sending for the wrong character because the generic bonus
+        fallback could reuse last_bonus_character/last_classic_fight_char after
+        the live bonus bytes had already gone stale.  Stage-specific bonus checks
+        should snapshot only explicit bytes from the relevant select/stage window.
+        """
+        for value in values:
+            if self._is_enabled_character_value(ctx, value):
+                return int(value)
+        return None
+
+    async def _bonus_character_with_fallback(
+        self,
+        ctx: "BizHawkClientContext",
+        *preferred_values: int | None,
+        raw_char: int | None = None,
+    ) -> int | None:
+        """Resolve a bonus-stage character, then fall back only when sending.
+
+        The previous latch-only version could leave the snapshot character as
+        None, which meant BTT/BTP/RTTF exits were detected but no AP location was
+        sent. Prefer stage-specific live/latched bytes first, then use the older
+        generic reader so checks still fire even if a bonus select byte was missed.
+        """
+        resolved = self._first_enabled_character_value(ctx, *preferred_values)
+        if resolved is not None:
+            return resolved
+        return await self._read_bonus_character(ctx, raw_char)
+
+    async def _read_bonus_character(self, ctx: "BizHawkClientContext", raw_char: int | None = None) -> int | None:
+        """Return the character actually being used for bonus-stage checks.
+
+        Break the Targets, Board the Platforms, and Race to the Finish do not all
+        keep the current character in the same byte.  Prefer the documented 1P
+        mode / selected-character bytes, then the in-fight P1 byte, and only use
+        remembered values as a final fallback.  This prevents BTP/RTTF from being
+        credited to the wrong character when the old BTT-only byte is stale.
+        """
+        candidates: list[int] = []
+
+        try:
+            candidates.extend(x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+                (addr, 1, "RDRAM") for addr in BONUS_CHARACTER_CANDIDATE_ADDRS
+            ]))
+        except bizhawk.RequestFailedError:
+            pass
+
+        if raw_char is not None:
+            candidates.append(int(raw_char))
+
+        for value in candidates:
+            if self._is_enabled_character_value(ctx, value):
+                self.last_bonus_character = int(value)
+                return int(value)
+
+        if self._is_enabled_character_value(ctx, self.last_bonus_character):
+            return self.last_bonus_character
+        if self._is_enabled_character_value(ctx, self.last_classic_fight_char):
+            return self.last_classic_fight_char
+
+        fallback = self._get_character_fallback_value(ctx)
+        if self._is_enabled_character_value(ctx, fallback):
+            self.last_bonus_character = int(fallback)
+            return int(fallback)
+        return None
+
+    def _get_bonus_character_fallback(self, ctx: "BizHawkClientContext", raw_char: int | None = None) -> int | None:
+        """Synchronous fallback kept for older call sites."""
+        if self._is_enabled_character_value(ctx, raw_char):
+            self.last_bonus_character = int(raw_char)
+            return int(raw_char)
+        if self._is_enabled_character_value(ctx, self.last_bonus_character):
+            return self.last_bonus_character
+        if self._is_enabled_character_value(ctx, self.last_classic_fight_char):
+            return self.last_classic_fight_char
+        return self._get_character_fallback_value(ctx)
+
+    async def _send_bonus_location_for_character(
+        self,
+        ctx: "BizHawkClientContext",
+        location_map: dict[int, int],
+        character_id: int | None,
+    ) -> None:
+        if character_id is None:
+            return
+        if character_id not in self.get_enabled_character_values(ctx):
+            return
+        location_id = location_map.get(int(character_id))
+        if location_id is not None:
+            await self._send_location_check_once(ctx, location_id)
+
     async def handle_classic_stage_checks(self, ctx: "BizHawkClientContext") -> None:
-        game_state, stage_id, char_id, difficulty_value, btt_char_id = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
+        read_values = [x[0] for x in await bizhawk.read(ctx.bizhawk_ctx, [
             (GAME_STATE_ADDR, 1, "RDRAM"),
             (CLASSIC_STAGE_ADDR, 1, "RDRAM"),
             (CLASSIC_CHAR_ADDR, 1, "RDRAM"),
             (DIFFICULTY_SELECT_ADDR, 1, "RDRAM"),
             (BTT_CHAR_ADDR, 1, "RDRAM"),
+            (CLASSIC_SELECTED_CHARACTER_ADDR, 1, "RDRAM"),
+            (CLASSIC_1P_MODE_CHARACTER_ADDR, 1, "RDRAM"),
+            (P1_FIGHTER_CHARACTER_ADDR, 1, "RDRAM"),
+            (SCREEN_CURRENT_ADDR, 1, "RDRAM"),
+            (CURRENT_STAGE_ADDR, 1, "RDRAM"),
+            (STAGE_ID_ALT_ADDR, 1, "RDRAM"),
+            (BTP_PLATFORMS_LEFT_ADDR, 1, "RDRAM"),
+            (RTTF_STATUS_1_ADDR, 1, "RDRAM"),
+            (RTTF_STATUS_2_ADDR, 1, "RDRAM"),
         ])]
+
+        (
+            game_state,
+            stage_id,
+            char_id,
+            difficulty_value,
+            btt_char_id,
+            selected_char_id,
+            mode_character_id,
+            p1_fighter_char_id,
+            screen_id,
+            current_stage_id,
+            stage_id_alt,
+            btp_platforms_left,
+            rttf_status_1,
+            rttf_status_2,
+        ) = read_values
 
         if difficulty_value not in DIFFICULTY_NAME_BY_VALUE:
             difficulty_value = 0
 
         self.last_seen_game_state = game_state
+        stage_candidates = {int(stage_id), int(current_stage_id), int(stage_id_alt)}
+        in_bonus_state = game_state == STATE_BTT or screen_id == STATE_BTT
+
+        # Stage bytes are reliable for some bonus stages, but Board the
+        # Platforms can stay on the generic bonus state instead of exposing the
+        # expected 0x0A stage id. Use the platforms-remaining byte as the BTP
+        # discriminator: during BTP it should contain the number of platforms
+        # left, while non-BTP bonus stages should not hold a sane platform count.
+        btp_platform_count_active = 0 < int(btp_platforms_left) <= 20
+
+        is_btp_stage = BTP_STAGE_ID in stage_candidates or btp_platform_count_active
+        is_rttf_stage = RTTF_STAGE_ID in stage_candidates
+
+        # If the player came from the Board the Platforms character-select
+        # screen, the next bonus state is BTP even if no stage byte updates.
+        if screen_id == SCREEN_BTP_CHARACTER_SELECT:
+            self.bonus_stage_kind = "btp"
+        elif screen_id == SCREEN_BTT_CHARACTER_SELECT:
+            self.bonus_stage_kind = "btt"
+
+        if in_bonus_state and self.bonus_stage_kind == "btp":
+            is_btp_stage = True
+        elif in_bonus_state and is_btp_stage:
+            self.bonus_stage_kind = "btp"
+        elif in_bonus_state and is_rttf_stage:
+            self.bonus_stage_kind = "rttf"
+        elif in_bonus_state and self.bonus_stage_kind is None:
+            self.bonus_stage_kind = "btt"
+
+        is_btt_stage = (self.bonus_stage_kind == "btt") or (BTT_STAGE_ID in stage_candidates and not is_btp_stage and not is_rttf_stage)
+
+        # Bonus-stage character handling: use the same BTT-style fallback that
+        # was known to work. In Classic, the bonus stages should credit the
+        # character from the current Classic run, so prefer last_classic_fight_char
+        # and fall back to the AP-legal starting/unlocked character if needed.
+        # This intentionally avoids the newer BTP/RTTF latch-only logic, because
+        # those live character bytes can linger or point at the previous mode.
+        btt_style_bonus_char = await self._force_btt_character_from_last_classic_fight(ctx, btt_char_id)
+        if not self._is_enabled_character_value(ctx, btt_style_bonus_char):
+            btt_style_bonus_char = self._get_bonus_character_fallback(ctx, btt_char_id)
+
+        if screen_id == SCREEN_BTT_CHARACTER_SELECT:
+            self.latched_btt_select_char = btt_style_bonus_char
+            self.snapshot_btt_char = btt_style_bonus_char
+        elif screen_id == SCREEN_BTP_CHARACTER_SELECT:
+            self.latched_btp_select_char = btt_style_bonus_char
+            self.snapshot_btp_char = btt_style_bonus_char
+
+        btt_bonus_char = btt_style_bonus_char
+        btp_bonus_char = btt_style_bonus_char
+        rttf_bonus_char = btt_style_bonus_char
 
         # Normal Classic fight checks: snapshot the character/stage when battle starts,
         # then send the mapped opponent check when results appears.
@@ -2009,29 +2244,93 @@ class Smash64Client(BizHawkClient):
             self.snapshot_char = None
             self.snapshot_difficulty = None
 
-        # Break the Targets uses a different state and character byte.
-        # Confirmed values: state 0x35 while in BTT, 0x0A4B09 stores the selected character.
+        # Bonus stages are controlled by include_bonus_stages and use the same
+        # character association style as Break the Targets. We keep BTT/BTP/RTTF
+        # separate so entering Board the Platforms or Race to the Finish cannot
+        # accidentally send the Break the Targets check.
         slot_data = getattr(ctx, "slot_data", None) or {}
         include_bonus_stages = bool(slot_data.get("include_bonus_stages", True))
         if include_bonus_stages:
-            if game_state == STATE_BTT:
-                btt_char_id = await self._force_btt_character_from_last_classic_fight(ctx, btt_char_id)
+            if in_bonus_state and is_btt_stage and not is_btp_stage and not is_rttf_stage:
+                current_bonus_char = btt_bonus_char
 
                 if self.prev_game_state != STATE_BTT:
-                    self.snapshot_btt_char = btt_char_id
+                    self.snapshot_btt_char = current_bonus_char
                 elif self.snapshot_btt_char is None:
-                    self.snapshot_btt_char = btt_char_id
+                    self.snapshot_btt_char = current_bonus_char
 
-            # When BTT ends/leaves state 0x35, award the character's Break the Targets check.
-            # This currently means the bonus stage was reached/finished, not necessarily every target was broken.
+            # Board the Platforms: award the character's check after the BTP
+            # stage is reached and then left, matching the BTT behavior. This
+            # means the player does not need to board every platform; reaching/
+            # ending the bonus stage is enough to send the check. BTP detection
+            # accepts either the 0x0A stage id or a sane platforms-left count.
+            if in_bonus_state and is_btp_stage:
+                if self.snapshot_btp_char is None:
+                    self.snapshot_btp_char = btp_bonus_char
+                self.snapshot_btp_platforms_started = True
+
+            # When BTT/BTP leaves state 0x35, award the correct bonus check.
+            # This must be ordered with BTP first so a BTP run does not fall
+            # through to the generic BTT exit path.
             if self.prev_game_state == STATE_BTT and game_state != STATE_BTT:
-                if self.snapshot_btt_char is not None and self.snapshot_btt_char in self.get_enabled_character_values(ctx):
-                    location_id = location_id_by_btt_character_id.get(self.snapshot_btt_char)
-                    if location_id is not None:
-                        await self._send_location_check_once(ctx, location_id)
-                self.snapshot_btt_char = None
+                if self.snapshot_btp_platforms_started or self.bonus_stage_kind == "btp":
+                    send_char = self.snapshot_btp_char or btt_style_bonus_char
+                    if send_char is None:
+                        send_char = self._get_bonus_character_fallback(ctx, btt_char_id)
+                    if send_char is not None:
+                        await self._send_bonus_location_for_character(ctx, location_id_by_btp_character_id, send_char)
+                    self.snapshot_btp_char = None
+                    self.latched_btp_select_char = None
+                    self.snapshot_btp_platforms_started = False
+                    self.bonus_stage_kind = None
+                elif self.bonus_stage_kind in {None, "btt"}:
+                    send_char = self.snapshot_btt_char or btt_style_bonus_char
+                    if send_char is None:
+                        send_char = self._get_bonus_character_fallback(ctx, btt_char_id)
+                    if send_char is not None:
+                        await self._send_bonus_location_for_character(ctx, location_id_by_btt_character_id, send_char)
+                    self.snapshot_btt_char = None
+                    self.latched_btt_select_char = None
+                    self.bonus_stage_kind = None
+
+            elif self.snapshot_btp_platforms_started and not is_btp_stage and not in_bonus_state:
+                send_char = self.snapshot_btp_char or btt_style_bonus_char
+                if send_char is None:
+                    send_char = self._get_bonus_character_fallback(ctx, btt_char_id)
+                if send_char is not None:
+                    await self._send_bonus_location_for_character(ctx, location_id_by_btp_character_id, send_char)
+                self.snapshot_btp_char = None
+                self.latched_btp_select_char = None
+                self.snapshot_btp_platforms_started = False
+                self.bonus_stage_kind = None
+
+            # Race to the Finish: the notes identify the status bytes becoming
+            # 0x40 on finish. Send the character's check when either status byte
+            # reaches that clear value during the Race stage.
+            if in_bonus_state and is_rttf_stage:
+                if self.snapshot_rttf_char is None:
+                    self.snapshot_rttf_char = rttf_bonus_char
+                self.snapshot_rttf_started = True
+                if rttf_status_1 == RTTF_CLEAR_STATUS or rttf_status_2 == RTTF_CLEAR_STATUS:
+                    send_char = self.snapshot_rttf_char or btt_style_bonus_char
+                    if send_char is None:
+                        send_char = self._get_bonus_character_fallback(ctx, btt_char_id)
+                    if send_char is not None:
+                        await self._send_bonus_location_for_character(ctx, location_id_by_rttf_character_id, send_char)
+                    self.snapshot_rttf_char = None
+                    self.snapshot_rttf_started = False
+            elif self.snapshot_rttf_char is not None and not is_rttf_stage:
+                self.snapshot_rttf_char = None
+                self.snapshot_rttf_started = False
         else:
             self.snapshot_btt_char = None
+            self.snapshot_btp_char = None
+            self.snapshot_rttf_char = None
+            self.latched_btt_select_char = None
+            self.latched_btp_select_char = None
+            self.snapshot_btp_platforms_started = False
+            self.bonus_stage_kind = None
+            self.snapshot_rttf_started = False
 
         self.prev_game_state = game_state
 

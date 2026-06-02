@@ -91,6 +91,7 @@ class Smash64World(World):
 
     Checks:
     - Every supported 1P Game / Classic opponent fight as each character.
+    - Optional bonus-stage checks for Break the Targets, Board the Platforms, and Race to the Finish.
 
     Items:
     - Unlock one playable character.
@@ -149,7 +150,7 @@ class Smash64World(World):
         """Build a deterministic per-slot table for the BizHawk client.
 
         Keys are character_id:stage_id:difficulty_value. Values are three CPU
-        character bytes for the three Classic CPU slots found at 0x0A4BAF,
+        character bytes for the three Classic CPU slots found at 0x0A4B8F,
         0x0A4C23, and 0x0A4C97. Master Hand is left out because it is not a
         normal playable-character CPU.
         """
@@ -230,7 +231,7 @@ class Smash64World(World):
             if data["character"] not in enabled_character_names:
                 continue
 
-            if data["type"] == "bonus_btt" and not include_bonus:
+            if data["type"] in {"bonus_btt", "bonus_btp", "bonus_rttf"} and not include_bonus:
                 continue
 
             if data["type"] == "classic_fight" and self._is_randomizing_classic_cpu_characters():

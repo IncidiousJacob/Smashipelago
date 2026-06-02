@@ -21,6 +21,7 @@ character_checks:
   - ness
   - jigglypuff
 required_classic_completions: 8
+# Includes Break the Targets, Board the Platforms, and Race to the Finish checks.
 include_bonus_stages: true
 starting_max_stocks: 1
 # Pick exactly which Classic difficulties have locations and are selectable.
